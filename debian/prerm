@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+
+systemctl stop helium-multi-gateway.service
+systemctl disable helium-multi-gateway.service

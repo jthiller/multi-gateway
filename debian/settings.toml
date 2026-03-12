@@ -1,0 +1,14 @@
+keys_dir = "/var/lib/helium-multi-gateway/keys"
+region = "US915"
+api_addr = "127.0.0.1:4468"
+
+[gwmp]
+addr = "0.0.0.0"
+port = 1680
+
+[router]
+uri = "http://mainnet-router.helium.io:8080/"
+queue = 100
+
+[log]
+level = "info"

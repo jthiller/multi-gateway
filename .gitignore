@@ -1,0 +1,13 @@
+/target/
+**/target/
+
+
+# IDE directories
+.idea/
+.vscode/
+
+# Settings files
+/settings.toml
+
+# Keys
+/keys/

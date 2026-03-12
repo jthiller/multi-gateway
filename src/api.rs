@@ -1,0 +1,213 @@
+//! REST API for gateway status and management.
+//!
+//! Provides endpoints:
+//! - GET /gateways - List all known gateways with status
+//! - GET /gateways/:mac - Get status for a specific gateway
+//! - POST /gateways/:mac/sign - Sign data with gateway's keypair
+//! - GET /metrics - Prometheus metrics
+
+use crate::gateway_table::GatewayTable;
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::Json,
+    routing::{get, post},
+    Router,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::info;
+
+/// API response for listing gateways
+#[derive(Serialize)]
+pub struct GatewaysResponse {
+    pub gateways: Vec<crate::gateway_table::GatewayInfo>,
+    pub total: usize,
+    pub connected: usize,
+}
+
+/// API response for errors
+#[derive(Serialize)]
+pub struct ErrorResponse {
+    pub error: String,
+}
+
+/// Request body for signing
+#[derive(Deserialize)]
+pub struct SignRequest {
+    /// Base64-encoded data to sign
+    pub data: String,
+}
+
+/// Response body for signing
+#[derive(Serialize)]
+pub struct SignResponse {
+    /// Base64-encoded signature
+    pub signature: String,
+}
+
+/// Create the API router
+pub fn create_router(table: Arc<GatewayTable>) -> Router {
+    Router::new()
+        .route("/gateways", get(list_gateways))
+        .route("/gateways/{mac}", get(get_gateway))
+        .route("/gateways/{mac}/sign", post(sign_data))
+        .route("/metrics", get(metrics_handler))
+        .with_state(table)
+}
+
+/// Prometheus metrics endpoint
+async fn metrics_handler() -> String {
+    crate::metrics::gather()
+}
+
+/// List all gateways
+async fn list_gateways(State(table): State<Arc<GatewayTable>>) -> Json<GatewaysResponse> {
+    let gateways = table.list_gateways().await;
+    let total = gateways.len();
+    let connected = gateways.iter().filter(|g| g.connected).count();
+
+    Json(GatewaysResponse {
+        gateways,
+        total,
+        connected,
+    })
+}
+
+/// Get a specific gateway by MAC address
+async fn get_gateway(
+    State(table): State<Arc<GatewayTable>>,
+    Path(mac): Path<String>,
+) -> Result<Json<crate::gateway_table::GatewayInfo>, (StatusCode, Json<ErrorResponse>)> {
+    // Parse MAC address from string (16 hex chars)
+    if mac.len() != 16 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid MAC address format. Expected 16 hex characters.".to_string(),
+            }),
+        ));
+    }
+
+    let mac_bytes: Result<Vec<u8>, _> = (0..8)
+        .map(|i| u8::from_str_radix(&mac[i * 2..i * 2 + 2], 16))
+        .collect();
+
+    let mac_bytes = mac_bytes.map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid MAC address format. Expected 16 hex characters.".to_string(),
+            }),
+        )
+    })?;
+
+    let mut arr = [0u8; 8];
+    arr.copy_from_slice(&mac_bytes);
+    let mac_addr = gateway_rs::semtech_udp::MacAddress::from(arr);
+
+    match table.get_gateway(&mac_addr).await {
+        Some(info) => Ok(Json(info)),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Gateway {} not found", mac),
+            }),
+        )),
+    }
+}
+
+/// Sign data with a gateway's keypair
+async fn sign_data(
+    State(table): State<Arc<GatewayTable>>,
+    Path(mac): Path<String>,
+    Json(request): Json<SignRequest>,
+) -> Result<Json<SignResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Parse MAC address
+    let mac_addr = parse_mac(&mac)?;
+
+    // Decode base64 data
+    let data = BASE64.decode(&request.data).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid base64 data".to_string(),
+            }),
+        )
+    })?;
+
+    // Sign the data
+    match table.sign(&mac_addr, &data).await {
+        Ok(Some(signature)) => {
+            let signature_b64 = BASE64.encode(&signature);
+            Ok(Json(SignResponse {
+                signature: signature_b64,
+            }))
+        }
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Gateway {} not found", mac),
+            }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Signing failed: {}", e),
+            }),
+        )),
+    }
+}
+
+/// Parse MAC address from hex string
+fn parse_mac(
+    mac: &str,
+) -> Result<gateway_rs::semtech_udp::MacAddress, (StatusCode, Json<ErrorResponse>)> {
+    if mac.len() != 16 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid MAC address format. Expected 16 hex characters.".to_string(),
+            }),
+        ));
+    }
+
+    let mac_bytes: Result<Vec<u8>, _> = (0..8)
+        .map(|i| u8::from_str_radix(&mac[i * 2..i * 2 + 2], 16))
+        .collect();
+
+    let mac_bytes = mac_bytes.map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid MAC address format. Expected 16 hex characters.".to_string(),
+            }),
+        )
+    })?;
+
+    let mut arr = [0u8; 8];
+    arr.copy_from_slice(&mac_bytes);
+    Ok(gateway_rs::semtech_udp::MacAddress::from(arr))
+}
+
+/// Run the API server
+pub async fn run_api_server(
+    listen_addr: String,
+    table: Arc<GatewayTable>,
+    shutdown: triggered::Listener,
+) -> anyhow::Result<()> {
+    let app = create_router(table);
+
+    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+    info!(addr = %listen_addr, "API server starting");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            info!("API server shutting down");
+        })
+        .await?;
+
+    Ok(())
+}

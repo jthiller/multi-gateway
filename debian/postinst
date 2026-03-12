@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+
+mkdir -p /var/lib/helium-multi-gateway/keys 2>/dev/null || true
+systemctl daemon-reload
+systemctl enable helium-multi-gateway.service
+systemctl start helium-multi-gateway.service

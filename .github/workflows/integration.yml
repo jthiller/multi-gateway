@@ -1,0 +1,115 @@
+name: Integration Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc and musl-tools
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler musl-tools
+
+      - name: Clone virtual-lorawan-device
+        uses: actions/checkout@v4
+        with:
+          repository: lthiery/virtual-lorawan-device
+          ref: lk/smoke-test
+          path: virtual-lorawan-device
+
+      - name: Build virtual-lorawan-device
+        working-directory: virtual-lorawan-device
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Configure virtual device
+        working-directory: virtual-lorawan-device
+        run: |
+          cat > settings/settings.toml << 'EOF'
+          [device.one.credentials]
+          dev_eui = "${{ secrets.TEST_DEV_EUI }}"
+          app_eui = "${{ secrets.TEST_APP_EUI }}"
+          app_key = "${{ secrets.TEST_APP_KEY }}"
+          EOF
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build deb package
+        run: cargo deb --target x86_64-unknown-linux-musl
+
+      - name: Install deb package
+        run: sudo dpkg -i target/debian/helium-multi-gateway_*.deb
+
+      - name: Verify service is running
+        run: |
+          sleep 2
+          sudo systemctl is-active helium-multi-gateway
+
+      - name: Check logs for startup
+        run: sudo journalctl -u helium-multi-gateway --no-pager -n 20
+
+      - name: Verify API is responding with valid structure
+        run: |
+          response=$(curl -sf http://127.0.0.1:4468/gateways)
+          echo "$response" | jq .
+          echo "$response" | jq -e '.total >= 0'
+          echo "$response" | jq -e '.connected >= 0'
+          echo "$response" | jq -e '.gateways | type == "array"'
+
+      - name: Run integration test
+        working-directory: virtual-lorawan-device
+        timeout-minutes: 5
+        run: |
+          RUST_LOG=info ./target/x86_64-unknown-linux-gnu/release/virtual-lorawan-device \
+            --settings ./settings \
+            --smoke-test 30
+
+      - name: Verify gateway appeared after integration test
+        run: |
+          response=$(curl -sf http://127.0.0.1:4468/gateways)
+          echo "$response" | jq .
+          total=$(echo "$response" | jq '.total')
+          echo "Total gateways: $total"
+          if [ "$total" -lt 1 ]; then
+            echo "Expected at least 1 gateway after integration test"
+            exit 1
+          fi
+          # Verify gateway fields are present
+          echo "$response" | jq -e '.gateways[0].mac'
+          echo "$response" | jq -e '.gateways[0].public_key'
+          echo "$response" | jq -e '.gateways[0] | has("connected")'
+          # Test single gateway endpoint
+          mac=$(echo "$response" | jq -r '.gateways[0].mac')
+          gw_response=$(curl -sf "http://127.0.0.1:4468/gateways/$mac")
+          echo "$gw_response" | jq .
+          echo "$gw_response" | jq -e '.mac'
+          echo "$gw_response" | jq -e '.public_key'
+
+      - name: Verify Prometheus metrics after integration test
+        run: |
+          metrics=$(curl -sf http://127.0.0.1:4468/metrics)
+          echo "$metrics"
+          # Verify gateway connection was counted
+          echo "$metrics" | grep -E '^gateway_connections_total\{mac="[0-9a-f]+"\} [1-9]'
+          # Verify uplink packets were counted
+          echo "$metrics" | grep -E '^packets_uplink_total\{mac="[0-9a-f]+"\} [1-9]'
+          # Verify downlink packets were counted
+          echo "$metrics" | grep -E '^packets_downlink_total\{mac="[0-9a-f]+"\} [1-9]'
+
+      - name: Show multi-gateway logs
+        if: always()
+        run: sudo journalctl -u helium-multi-gateway --no-pager -n 100
