@@ -73,6 +73,27 @@ After editing, restart the service:
 sudo systemctl restart helium-multi-gateway
 ```
 
+### API key authentication
+
+The REST API supports optional API key authentication via `X-API-Key` header. Two
+separate keys can be configured independently:
+
+| Setting | Protects | Endpoints |
+|---------|----------|-----------|
+| `read_api_key` | Read-only access | `GET /gateways`, `GET /gateways/{mac}`, `GET /metrics` |
+| `write_api_key` | Write/signing access | `POST /gateways/{mac}/sign` |
+
+```toml
+# Optional: protect read endpoints
+# read_api_key = "your-read-key"
+
+# Optional: protect the signing endpoint
+write_api_key = "your-write-key"
+```
+
+If a key is not set, those endpoints remain open. The CLI subcommands automatically send the
+appropriate key from the config file.
+
 ## REST API
 
 The API listens on `api_addr` (default `127.0.0.1:4468`).
@@ -117,6 +138,7 @@ base64-encoded.
 ```bash
 curl -X POST http://127.0.0.1:4468/gateways/AABBCCDDEEFF0011/sign \
   -H 'Content-Type: application/json' \
+  -H 'X-API-Key: your-write-key' \
   -d '{"data": "<base64-encoded-data>"}'
 ```
 

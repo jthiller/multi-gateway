@@ -8,9 +8,10 @@
 
 use crate::gateway_table::GatewayTable;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::StatusCode,
-    response::Json,
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -18,6 +19,14 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
+
+/// Shared API state
+#[derive(Clone)]
+pub struct ApiState {
+    pub table: Arc<GatewayTable>,
+    pub read_api_key: Option<String>,
+    pub write_api_key: Option<String>,
+}
 
 /// API response for listing gateways
 #[derive(Serialize)]
@@ -47,14 +56,77 @@ pub struct SignResponse {
     pub signature: String,
 }
 
+fn check_api_key(expected: &Option<String>, request: &Request) -> Result<(), Response> {
+    if let Some(expected_key) = expected {
+        match request.headers().get("x-api-key") {
+            Some(provided) if provided.as_bytes() == expected_key.as_bytes() => Ok(()),
+            Some(_) => Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid API key".to_string(),
+                }),
+            )
+                .into_response()),
+            None => Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Missing X-API-Key header".to_string(),
+                }),
+            )
+                .into_response()),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Middleware for read-only endpoints.
+async fn read_auth(
+    State(state): State<ApiState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Err(resp) = check_api_key(&state.read_api_key, &request) {
+        return resp;
+    }
+    next.run(request).await
+}
+
+/// Middleware for write endpoints (signing).
+async fn write_auth(
+    State(state): State<ApiState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Err(resp) = check_api_key(&state.write_api_key, &request) {
+        return resp;
+    }
+    next.run(request).await
+}
+
 /// Create the API router
-pub fn create_router(table: Arc<GatewayTable>) -> Router {
-    Router::new()
+pub fn create_router(
+    table: Arc<GatewayTable>,
+    read_api_key: Option<String>,
+    write_api_key: Option<String>,
+) -> Router {
+    let state = ApiState {
+        table,
+        read_api_key,
+        write_api_key,
+    };
+
+    let read_routes = Router::new()
         .route("/gateways", get(list_gateways))
         .route("/gateways/{mac}", get(get_gateway))
-        .route("/gateways/{mac}/sign", post(sign_data))
         .route("/metrics", get(metrics_handler))
-        .with_state(table)
+        .layer(middleware::from_fn_with_state(state.clone(), read_auth));
+
+    let write_routes = Router::new()
+        .route("/gateways/{mac}/sign", post(sign_data))
+        .layer(middleware::from_fn_with_state(state.clone(), write_auth));
+
+    read_routes.merge(write_routes).with_state(state)
 }
 
 /// Prometheus metrics endpoint
@@ -63,8 +135,8 @@ async fn metrics_handler() -> String {
 }
 
 /// List all gateways
-async fn list_gateways(State(table): State<Arc<GatewayTable>>) -> Json<GatewaysResponse> {
-    let gateways = table.list_gateways().await;
+async fn list_gateways(State(state): State<ApiState>) -> Json<GatewaysResponse> {
+    let gateways = state.table.list_gateways().await;
     let total = gateways.len();
     let connected = gateways.iter().filter(|g| g.connected).count();
 
@@ -77,7 +149,7 @@ async fn list_gateways(State(table): State<Arc<GatewayTable>>) -> Json<GatewaysR
 
 /// Get a specific gateway by MAC address
 async fn get_gateway(
-    State(table): State<Arc<GatewayTable>>,
+    State(state): State<ApiState>,
     Path(mac): Path<String>,
 ) -> Result<Json<crate::gateway_table::GatewayInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Parse MAC address from string (16 hex chars)
@@ -107,7 +179,7 @@ async fn get_gateway(
     arr.copy_from_slice(&mac_bytes);
     let mac_addr = gateway_rs::semtech_udp::MacAddress::from(arr);
 
-    match table.get_gateway(&mac_addr).await {
+    match state.table.get_gateway(&mac_addr).await {
         Some(info) => Ok(Json(info)),
         None => Err((
             StatusCode::NOT_FOUND,
@@ -120,7 +192,7 @@ async fn get_gateway(
 
 /// Sign data with a gateway's keypair
 async fn sign_data(
-    State(table): State<Arc<GatewayTable>>,
+    State(state): State<ApiState>,
     Path(mac): Path<String>,
     Json(request): Json<SignRequest>,
 ) -> Result<Json<SignResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -138,7 +210,7 @@ async fn sign_data(
     })?;
 
     // Sign the data
-    match table.sign(&mac_addr, &data).await {
+    match state.table.sign(&mac_addr, &data).await {
         Ok(Some(signature)) => {
             let signature_b64 = BASE64.encode(&signature);
             Ok(Json(SignResponse {
@@ -195,9 +267,11 @@ fn parse_mac(
 pub async fn run_api_server(
     listen_addr: String,
     table: Arc<GatewayTable>,
+    read_api_key: Option<String>,
+    write_api_key: Option<String>,
     shutdown: triggered::Listener,
 ) -> anyhow::Result<()> {
-    let app = create_router(table);
+    let app = create_router(table, read_api_key, write_api_key);
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     info!(addr = %listen_addr, "API server starting");

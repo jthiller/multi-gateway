@@ -17,6 +17,14 @@ pub struct Settings {
     /// Defaults to empty which uses the unknown region
     #[serde(default)]
     pub region: String,
+    /// API key for read-only endpoints (list/get gateways, metrics).
+    /// If set, clients must send `X-API-Key: <key>` header.
+    #[serde(default)]
+    pub read_api_key: Option<String>,
+    /// API key for write endpoints (signing).
+    /// If set, clients must send `X-API-Key: <key>` header.
+    #[serde(default)]
+    pub write_api_key: Option<String>,
     #[serde(default)]
     pub log: LogSettings,
 }

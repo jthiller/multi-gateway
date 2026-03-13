@@ -78,7 +78,12 @@ fn main() -> Result<()> {
             match gateways {
                 Gateways::List => {
                     let url = format!("http://{}/gateways", settings.api_addr);
-                    let response = reqwest::blocking::get(&url).map_err(|e| {
+                    let client = reqwest::blocking::Client::new();
+                    let mut request = client.get(&url);
+                    if let Some(ref key) = settings.read_api_key {
+                        request = request.header("X-API-Key", key);
+                    }
+                    let response = request.send().map_err(|e| {
                         anyhow::anyhow!("Failed to connect to server at {}: {}", url, e)
                     })?;
 
@@ -115,11 +120,11 @@ fn main() -> Result<()> {
                 Gateways::Sign { mac, data, format } => {
                     let url = format!("http://{}/gateways/{}/sign", settings.api_addr, mac);
                     let client = reqwest::blocking::Client::new();
-                    let response = client
-                        .post(&url)
-                        .json(&SignRequestBody { data })
-                        .send()
-                        .map_err(|e| {
+                    let mut request = client.post(&url).json(&SignRequestBody { data });
+                    if let Some(ref key) = settings.write_api_key {
+                        request = request.header("X-API-Key", key);
+                    }
+                    let response = request.send().map_err(|e| {
                             anyhow::anyhow!("Failed to connect to server at {}: {}", url, e)
                         })?;
 
@@ -211,6 +216,8 @@ async fn run(settings: Settings) -> Result<()> {
     let api_handle = tokio::spawn(api::run_api_server(
         settings.api_addr.clone(),
         table.clone(),
+        settings.read_api_key.clone(),
+        settings.write_api_key.clone(),
         shutdown_listener,
     ));
 

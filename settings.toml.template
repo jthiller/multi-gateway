@@ -1,6 +1,8 @@
 keys_dir = "/var/lib/helium-multi-gateway/keys"
 region = "US915"
 api_addr = "127.0.0.1:4468"
+# read_api_key = "your-read-api-key-here"
+# write_api_key = "your-write-api-key-here"
 
 [gwmp]
 addr = "0.0.0.0"
