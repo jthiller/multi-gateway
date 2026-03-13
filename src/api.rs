@@ -81,11 +81,7 @@ fn check_api_key(expected: &Option<String>, request: &Request) -> Result<(), Res
 }
 
 /// Middleware for read-only endpoints.
-async fn read_auth(
-    State(state): State<ApiState>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn read_auth(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     if let Err(resp) = check_api_key(&state.read_api_key, &request) {
         return resp;
     }
@@ -93,11 +89,7 @@ async fn read_auth(
 }
 
 /// Middleware for write endpoints (signing).
-async fn write_auth(
-    State(state): State<ApiState>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn write_auth(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     if let Err(resp) = check_api_key(&state.write_api_key, &request) {
         return resp;
     }

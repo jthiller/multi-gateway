@@ -125,8 +125,8 @@ fn main() -> Result<()> {
                         request = request.header("X-API-Key", key);
                     }
                     let response = request.send().map_err(|e| {
-                            anyhow::anyhow!("Failed to connect to server at {}: {}", url, e)
-                        })?;
+                        anyhow::anyhow!("Failed to connect to server at {}: {}", url, e)
+                    })?;
 
                     if !response.status().is_success() {
                         let status = response.status();
