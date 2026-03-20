@@ -120,10 +120,10 @@ jobs:
           echo "UPLINKS_BEFORE=$uplinks" >> "$GITHUB_ENV"
           echo "Gateway $mac had $uplinks uplinks before reconnect test"
 
-      - name: Wait for semtech-udp disconnect timeout (35s)
+      - name: Wait for semtech-udp disconnect timeout (65s)
         run: |
-          echo "Waiting 35s for PULL_DATA timeout to trigger ClientDisconnected..."
-          sleep 35
+          echo "Waiting 65s for disconnect (30s timeout + 30s cache check interval)..."
+          sleep 65
 
       - name: Verify gateway disconnected
         run: |
@@ -132,7 +132,7 @@ jobs:
           connected=$(echo "$response" | jq '.connected')
           echo "Gateway connected: $connected"
           if [ "$connected" != "false" ]; then
-            echo "Expected gateway to be disconnected after 35s timeout"
+            echo "Expected gateway to be disconnected after 65s wait"
             exit 1
           fi
 
