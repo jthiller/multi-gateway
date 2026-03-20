@@ -1082,6 +1082,7 @@ dependencies = [
  "prometheus",
  "qr2term",
  "reqwest",
+ "semtech-udp",
  "serde",
  "serde_json",
  "tokio",
@@ -2533,15 +2534,14 @@ dependencies = [
 [[package]]
 name = "semtech-udp"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e188b7049d90ac633978c9cab2d56b165e34e0922908f8cadbc7cbcff6e3370"
+source = "git+https://github.com/lthiery/semtech-udp.git?branch=configurable-disconnect-timeout#d1565e1039b0b3357f5aa9a353b64a066e82afec"
 dependencies = [
  "arrayref",
- "base64 0.22.1",
+ "base64 0.21.7",
  "lora-modulation",
  "macaddr",
  "num_enum",
- "rand 0.9.2",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "serde_repr",

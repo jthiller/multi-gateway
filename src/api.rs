@@ -56,6 +56,7 @@ pub struct SignResponse {
     pub signature: String,
 }
 
+#[allow(clippy::result_large_err)]
 fn check_api_key(expected: &Option<String>, request: &Request) -> Result<(), Response> {
     if let Some(expected_key) = expected {
         match request.headers().get("x-api-key") {

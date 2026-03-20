@@ -202,7 +202,15 @@ async fn run(settings: Settings) -> Result<()> {
 
     // Create UDP dispatcher
     let listen_addr = format!("{}:{}", settings.gwmp.addr, settings.gwmp.port);
-    let dispatcher = UdpDispatcher::new(&listen_addr, table.clone(), downlink_rx, region).await?;
+    let disconnect_timeout = std::time::Duration::from_secs(settings.gwmp.disconnect_timeout);
+    let dispatcher = UdpDispatcher::new(
+        &listen_addr,
+        table.clone(),
+        downlink_rx,
+        region,
+        disconnect_timeout,
+    )
+    .await?;
 
     info!(
         udp_addr = %listen_addr,

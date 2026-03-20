@@ -110,6 +110,58 @@ jobs:
           # Verify downlink packets were counted
           echo "$metrics" | grep -E '^packets_downlink_total\{mac="[0-9a-f]+"\} [1-9]'
 
+      - name: Save pre-reconnect state
+        run: |
+          response=$(curl -sf http://127.0.0.1:4468/gateways)
+          mac=$(echo "$response" | jq -r '.gateways[0].mac')
+          echo "MAC=$mac" >> "$GITHUB_ENV"
+          metrics=$(curl -sf http://127.0.0.1:4468/metrics)
+          uplinks=$(echo "$metrics" | grep -oP "^packets_uplink_total\{mac=\"$mac\"\} \K[0-9]+")
+          echo "UPLINKS_BEFORE=$uplinks" >> "$GITHUB_ENV"
+          echo "Gateway $mac had $uplinks uplinks before reconnect test"
+
+      - name: Wait for semtech-udp disconnect timeout (35s)
+        run: |
+          echo "Waiting 35s for PULL_DATA timeout to trigger ClientDisconnected..."
+          sleep 35
+
+      - name: Verify gateway disconnected
+        run: |
+          response=$(curl -sf "http://127.0.0.1:4468/gateways/$MAC")
+          echo "$response" | jq .
+          connected=$(echo "$response" | jq '.connected')
+          echo "Gateway connected: $connected"
+          if [ "$connected" != "false" ]; then
+            echo "Expected gateway to be disconnected after 35s timeout"
+            exit 1
+          fi
+
+      - name: Reconnect virtual device (second smoke test)
+        working-directory: virtual-lorawan-device
+        timeout-minutes: 5
+        run: |
+          RUST_LOG=info ./target/x86_64-unknown-linux-gnu/release/virtual-lorawan-device \
+            --settings ./settings \
+            --smoke-test 30
+
+      - name: Verify gateway reconnected and uplinks increased
+        run: |
+          response=$(curl -sf "http://127.0.0.1:4468/gateways/$MAC")
+          echo "$response" | jq .
+          connected=$(echo "$response" | jq '.connected')
+          if [ "$connected" != "true" ]; then
+            echo "Expected gateway to be connected after reconnect"
+            exit 1
+          fi
+          metrics=$(curl -sf http://127.0.0.1:4468/metrics)
+          uplinks=$(echo "$metrics" | grep -oP "^packets_uplink_total\{mac=\"$MAC\"\} \K[0-9]+")
+          echo "Uplinks before: $UPLINKS_BEFORE, after: $uplinks"
+          if [ "$uplinks" -le "$UPLINKS_BEFORE" ]; then
+            echo "Expected uplink count to increase after reconnect"
+            exit 1
+          fi
+          echo "Reconnect test passed: gateway recovered and forwarded packets"
+
       - name: Show multi-gateway logs
         if: always()
         run: sudo journalctl -u helium-multi-gateway --no-pager -n 100

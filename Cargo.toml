@@ -41,4 +41,8 @@ tracing-subscriber = { version = "0", default-features = false, features = [
     "fmt",
     "std",
 ] }
+semtech-udp = { git = "https://github.com/lthiery/semtech-udp.git", branch = "configurable-disconnect-timeout", default-features = false, features = ["server"] }
 triggered = "0.1"
+
+[patch.crates-io]
+semtech-udp = { git = "https://github.com/lthiery/semtech-udp.git", branch = "configurable-disconnect-timeout" }

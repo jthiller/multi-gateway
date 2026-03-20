@@ -70,6 +70,13 @@ pub struct GwmpServerSettings {
     pub addr: String,
     /// Port used for GWMP
     pub port: u16,
+    /// Disconnect timeout in seconds for PULL_DATA keepalive (default: 30)
+    #[serde(default = "default_disconnect_timeout")]
+    pub disconnect_timeout: u64,
+}
+
+fn default_disconnect_timeout() -> u64 {
+    30
 }
 
 fn default_keys_dir() -> PathBuf {
@@ -81,6 +88,7 @@ impl Default for GwmpServerSettings {
         GwmpServerSettings {
             addr: "0.0.0.0".to_string(),
             port: 1680,
+            disconnect_timeout: default_disconnect_timeout(),
         }
     }
 }

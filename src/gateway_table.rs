@@ -89,8 +89,22 @@ impl GatewayEntry {
         self.keypair.public_key()
     }
 
-    /// Check if gateway is connected
-    pub fn is_connected(&self) -> bool {
+    /// Check if gateway is connected.
+    /// Also detects if the gRPC task has died and marks as disconnected.
+    pub fn is_connected(&mut self) -> bool {
+        if self.connected {
+            if let Some(ref handle) = self.task_handle {
+                if handle.is_finished() {
+                    let mac_name = mac_to_key_name(&self.mac);
+                    warn!(mac = %mac_name, "gRPC task died unexpectedly, marking disconnected");
+                    self.connected = false;
+                    self.connected_since = None;
+                    self.uplink_tx = None;
+                    self.task_handle = None;
+                    return false;
+                }
+            }
+        }
         self.connected
     }
 
@@ -104,10 +118,16 @@ impl GatewayEntry {
         self.last_uplink.map(|t| t.elapsed())
     }
 
-    /// Send an uplink packet
-    pub async fn send_uplink(&mut self, packet: PacketUp) {
+    /// Send an uplink packet.
+    /// Returns false if the task is dead and needs restart.
+    pub async fn send_uplink(&mut self, packet: PacketUp) -> bool {
         let now = Instant::now();
         self.last_uplink = Some(now);
+
+        if !self.is_connected() {
+            warn!(mac = %mac_to_key_name(&self.mac), "task dead, cannot send uplink");
+            return false;
+        }
 
         if let Some(ref tx) = self.uplink_tx {
             if tx
@@ -118,9 +138,16 @@ impl GatewayEntry {
                 .await
                 .is_err()
             {
-                warn!(mac = %mac_to_key_name(&self.mac), "uplink channel closed");
+                let mac_name = mac_to_key_name(&self.mac);
+                warn!(mac = %mac_name, "uplink channel closed, task likely dead");
+                self.connected = false;
+                self.connected_since = None;
+                self.uplink_tx = None;
+                self.task_handle = None;
+                return false;
             }
         }
+        true
     }
 
     /// Start the gRPC task for this gateway
@@ -163,7 +190,8 @@ impl GatewayEntry {
         }
     }
 
-    /// Mark as connected and start gRPC task
+    /// Mark as connected and start gRPC task.
+    /// If already connected, restarts the task to avoid stale state.
     fn connect(
         &mut self,
         router_uri: Uri,
@@ -171,11 +199,14 @@ impl GatewayEntry {
         downlink_tx: DownlinkSender,
         shutdown: triggered::Listener,
     ) {
-        if !self.connected {
-            self.connected = true;
-            self.connected_since = Some(Instant::now());
-            self.start_task(router_uri, queue_size, downlink_tx, shutdown);
+        if self.connected {
+            let mac_name = mac_to_key_name(&self.mac);
+            warn!(mac = %mac_name, "gateway reconnected while still marked connected, restarting task");
+            self.stop_task();
         }
+        self.connected = true;
+        self.connected_since = Some(Instant::now());
+        self.start_task(router_uri, queue_size, downlink_tx, shutdown);
     }
 
     /// Mark as disconnected and stop gRPC task
@@ -334,7 +365,17 @@ impl GatewayTable {
             entry
         };
 
-        entry.send_uplink(packet).await;
+        if !entry.send_uplink(packet).await {
+            // Task was dead, restart it
+            let mac_name = mac_to_key_name(&mac);
+            warn!(mac = %mac_name, "restarting dead gRPC task");
+            entry.connect(
+                self.router_uri.clone(),
+                self.queue_size,
+                self.downlink_tx.clone(),
+                self.shutdown.clone(),
+            );
+        }
         Ok(())
     }
 

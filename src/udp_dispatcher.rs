@@ -12,6 +12,7 @@ use gateway_rs::{
     PacketUp, Region,
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Default TX power for downlinks (in dBm)
@@ -31,9 +32,10 @@ impl UdpDispatcher {
         table: Arc<GatewayTable>,
         downlink_rx: DownlinkReceiver,
         region: Region,
+        disconnect_timeout: Duration,
     ) -> Result<Self> {
-        info!(addr = %listen_addr, "creating UDP dispatcher");
-        let udp_runtime = UdpRuntime::new(listen_addr)
+        info!(addr = %listen_addr, disconnect_timeout_secs = disconnect_timeout.as_secs(), "creating UDP dispatcher");
+        let udp_runtime = UdpRuntime::new_with_disconnect_timeout(listen_addr, disconnect_timeout)
             .await
             .map_err(|e| anyhow::anyhow!("failed to bind UDP socket on {listen_addr}: {e}"))?;
 
@@ -115,7 +117,8 @@ impl UdpDispatcher {
 
             Event::UpdateClient((mac, addr)) => {
                 let mac_name = mac_to_key_name(&mac);
-                debug!(mac = %mac_name, addr = %addr, "gateway address updated");
+                info!(mac = %mac_name, addr = %addr, "gateway address updated, reconnecting task");
+                self.table.on_connect(mac).await?;
             }
 
             Event::StatReceived(stat, mac) => {
