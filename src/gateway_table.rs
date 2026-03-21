@@ -19,15 +19,80 @@ use gateway_rs::{
 use http::Uri;
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ops::Deref,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 const STORE_GC_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_RECENT_PACKETS: usize = 50;
+
+/// Metadata for a single received packet
+#[derive(Debug, Clone, Serialize)]
+pub struct PacketMetadata {
+    pub rssi: i32,
+    pub snr: f32,
+    pub frequency: f64,
+    pub spreading_factor: String,
+    pub payload_size: usize,
+    pub timestamp: String,
+}
+
+impl PacketMetadata {
+    pub fn now(
+        rssi: i32,
+        snr: f32,
+        frequency: f64,
+        spreading_factor: String,
+        payload_size: usize,
+    ) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| {
+                let secs = d.as_secs();
+                let millis = d.subsec_millis();
+                format!(
+                    "{}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                    1970 + secs / 31_557_600,
+                    (secs % 31_557_600) / 2_629_800 + 1,
+                    (secs % 2_629_800) / 86400 + 1,
+                    (secs % 86400) / 3600,
+                    (secs % 3600) / 60,
+                    secs % 60,
+                    millis,
+                )
+            })
+            .unwrap_or_default();
+        Self {
+            rssi,
+            snr,
+            frequency,
+            spreading_factor,
+            payload_size,
+            timestamp,
+        }
+    }
+}
+
+/// Real-time event broadcast to SSE subscribers
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum GatewayEvent {
+    #[serde(rename = "gateway_connect")]
+    Connect { mac: String },
+    #[serde(rename = "gateway_disconnect")]
+    Disconnect { mac: String },
+    #[serde(rename = "uplink")]
+    Uplink {
+        mac: String,
+        metadata: PacketMetadata,
+    },
+    #[serde(rename = "downlink")]
+    Downlink { mac: String },
+}
 
 /// Downlink message to be sent back to a specific gateway
 #[derive(Debug)]
@@ -68,6 +133,12 @@ pub struct GatewayEntry {
     uplink_tx: Option<UplinkSender>,
     /// Task handle - dropping this cancels the gRPC task
     task_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Recent packet metadata ring buffer
+    recent_packets: VecDeque<PacketMetadata>,
+    /// Total uplink packets received
+    uplink_count: u64,
+    /// Total downlink packets sent
+    downlink_count: u64,
 }
 
 impl GatewayEntry {
@@ -81,6 +152,9 @@ impl GatewayEntry {
             last_uplink: None,
             uplink_tx: None,
             task_handle: None,
+            recent_packets: VecDeque::with_capacity(MAX_RECENT_PACKETS),
+            uplink_count: 0,
+            downlink_count: 0,
         }
     }
 
@@ -225,6 +299,20 @@ impl GatewayEntry {
             self.stop_task();
         }
     }
+
+    /// Record an uplink packet's metadata
+    fn record_uplink(&mut self, metadata: PacketMetadata) {
+        self.uplink_count += 1;
+        if self.recent_packets.len() >= MAX_RECENT_PACKETS {
+            self.recent_packets.pop_front();
+        }
+        self.recent_packets.push_back(metadata);
+    }
+
+    /// Record a downlink
+    fn record_downlink(&mut self) {
+        self.downlink_count += 1;
+    }
 }
 
 /// Gateway information for API responses
@@ -235,6 +323,8 @@ pub struct GatewayInfo {
     pub connected: bool,
     pub connected_seconds: Option<u64>,
     pub last_uplink_seconds_ago: Option<u64>,
+    pub uplink_count: u64,
+    pub downlink_count: u64,
 }
 
 impl From<&GatewayEntry> for GatewayInfo {
@@ -245,6 +335,8 @@ impl From<&GatewayEntry> for GatewayInfo {
             connected: entry.connected,
             connected_seconds: entry.connection_duration().map(|d| d.as_secs()),
             last_uplink_seconds_ago: entry.time_since_last_uplink().map(|d| d.as_secs()),
+            uplink_count: entry.uplink_count,
+            downlink_count: entry.downlink_count,
         }
     }
 }
@@ -263,6 +355,8 @@ pub struct GatewayTable {
     downlink_tx: DownlinkSender,
     /// Shutdown listener
     shutdown: triggered::Listener,
+    /// Broadcast channel for real-time events (SSE)
+    event_tx: broadcast::Sender<GatewayEvent>,
 }
 
 impl GatewayTable {
@@ -274,6 +368,7 @@ impl GatewayTable {
         downlink_tx: DownlinkSender,
         shutdown: triggered::Listener,
     ) -> Result<Self> {
+        let (event_tx, _) = broadcast::channel(1024);
         let table = Self {
             entries: RwLock::new(HashMap::new()),
             keys_dir,
@@ -281,12 +376,18 @@ impl GatewayTable {
             queue_size,
             downlink_tx,
             shutdown,
+            event_tx,
         };
 
         // Load existing keys
         table.load_existing_keys().await?;
 
         Ok(table)
+    }
+
+    /// Subscribe to real-time gateway events
+    pub fn subscribe(&self) -> broadcast::Receiver<GatewayEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Load all existing keys from the keys directory
@@ -332,6 +433,10 @@ impl GatewayTable {
             self.shutdown.clone(),
         );
 
+        let _ = self.event_tx.send(GatewayEvent::Connect {
+            mac: mac_to_key_name(&mac),
+        });
+
         Ok(())
     }
 
@@ -341,6 +446,9 @@ impl GatewayTable {
         if let Some(entry) = entries.get_mut(&mac) {
             entry.disconnect();
         }
+        let _ = self.event_tx.send(GatewayEvent::Disconnect {
+            mac: mac_to_key_name(&mac),
+        });
     }
 
     /// Send an uplink packet for a gateway
@@ -418,6 +526,37 @@ impl GatewayTable {
             }
             None => Ok(None),
         }
+    }
+
+    /// Record uplink packet metadata and broadcast event
+    pub async fn record_uplink_metadata(&self, mac: MacAddress, metadata: PacketMetadata) {
+        let mac_name = mac_to_key_name(&mac);
+        let _ = self.event_tx.send(GatewayEvent::Uplink {
+            mac: mac_name,
+            metadata: metadata.clone(),
+        });
+        let mut entries = self.entries.write().await;
+        if let Some(entry) = entries.get_mut(&mac) {
+            entry.record_uplink(metadata);
+        }
+    }
+
+    /// Record a downlink and broadcast event
+    pub async fn record_downlink_event(&self, mac: MacAddress) {
+        let mac_name = mac_to_key_name(&mac);
+        let _ = self.event_tx.send(GatewayEvent::Downlink { mac: mac_name });
+        let mut entries = self.entries.write().await;
+        if let Some(entry) = entries.get_mut(&mac) {
+            entry.record_downlink();
+        }
+    }
+
+    /// Get recent packets for a specific gateway
+    pub async fn get_recent_packets(&self, mac: &MacAddress) -> Option<Vec<PacketMetadata>> {
+        let entries = self.entries.read().await;
+        entries
+            .get(mac)
+            .map(|entry| entry.recent_packets.iter().cloned().collect())
     }
 }
 

@@ -3,7 +3,9 @@
 //! Provides endpoints:
 //! - GET /gateways - List all known gateways with status
 //! - GET /gateways/:mac - Get status for a specific gateway
+//! - GET /gateways/:mac/packets - Get recent packet metadata
 //! - POST /gateways/:mac/sign - Sign data with gateway's keypair
+//! - GET /events - SSE stream of real-time gateway events
 //! - GET /metrics - Prometheus metrics
 
 use crate::gateway_table::GatewayTable;
@@ -11,14 +13,25 @@ use axum::{
     extract::{Path, Request, State},
     http::StatusCode,
     middleware::{self, Next},
-    response::{IntoResponse, Json, Response},
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        IntoResponse, Json, Response,
+    },
     routing::{get, post},
     Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tracing::info;
+
+/// Maximum concurrent SSE connections
+const MAX_SSE_CONNECTIONS: u32 = 20;
 
 /// Shared API state
 #[derive(Clone)]
@@ -26,6 +39,7 @@ pub struct ApiState {
     pub table: Arc<GatewayTable>,
     pub read_api_key: Option<String>,
     pub write_api_key: Option<String>,
+    pub sse_connections: Arc<AtomicU32>,
 }
 
 /// API response for listing gateways
@@ -107,11 +121,13 @@ pub fn create_router(
         table,
         read_api_key,
         write_api_key,
+        sse_connections: Arc::new(AtomicU32::new(0)),
     };
 
     let read_routes = Router::new()
         .route("/gateways", get(list_gateways))
         .route("/gateways/{mac}", get(get_gateway))
+        .route("/gateways/{mac}/packets", get(get_gateway_packets))
         .route("/metrics", get(metrics_handler))
         .layer(middleware::from_fn_with_state(state.clone(), read_auth));
 
@@ -119,7 +135,13 @@ pub fn create_router(
         .route("/gateways/{mac}/sign", post(sign_data))
         .layer(middleware::from_fn_with_state(state.clone(), write_auth));
 
-    read_routes.merge(write_routes).with_state(state)
+    // SSE events endpoint — public, no auth, connection-limited
+    let public_routes = Router::new().route("/events", get(events_handler));
+
+    read_routes
+        .merge(write_routes)
+        .merge(public_routes)
+        .with_state(state)
 }
 
 /// Prometheus metrics endpoint
@@ -223,6 +245,65 @@ async fn sign_data(
             }),
         )),
     }
+}
+
+/// Get recent packets for a gateway
+async fn get_gateway_packets(
+    State(state): State<ApiState>,
+    Path(mac): Path<String>,
+) -> Result<Json<Vec<crate::gateway_table::PacketMetadata>>, (StatusCode, Json<ErrorResponse>)> {
+    let mac_addr = parse_mac(&mac)?;
+    match state.table.get_recent_packets(&mac_addr).await {
+        Some(packets) => Ok(Json(packets)),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Gateway {} not found", mac),
+            }),
+        )),
+    }
+}
+
+/// RAII guard that decrements SSE connection count on drop
+struct SseConnectionGuard(Arc<AtomicU32>);
+
+impl Drop for SseConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// SSE events endpoint — streams real-time gateway events
+async fn events_handler(
+    State(state): State<ApiState>,
+) -> Result<
+    Sse<impl Stream<Item = Result<SseEvent, std::convert::Infallible>>>,
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let current = state.sse_connections.fetch_add(1, Ordering::Relaxed);
+    if current >= MAX_SSE_CONNECTIONS {
+        state.sse_connections.fetch_sub(1, Ordering::Relaxed);
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Too many SSE connections".to_string(),
+            }),
+        ));
+    }
+
+    let guard = SseConnectionGuard(state.sse_connections.clone());
+    let rx = state.table.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        let _guard = &guard;
+        match result {
+            Ok(event) => serde_json::to_string(&event)
+                .ok()
+                .map(|json| Ok(SseEvent::default().data(json))),
+            Err(_) => None, // skip lagged messages
+        }
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// Parse MAC address from hex string

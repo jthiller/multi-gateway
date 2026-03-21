@@ -4,7 +4,7 @@
 //! identifies the gateway by MAC address, and routes packets to the
 //! appropriate gateway instance via the GatewayTable.
 
-use crate::gateway_table::{DownlinkMessage, DownlinkReceiver, GatewayTable};
+use crate::gateway_table::{DownlinkMessage, DownlinkReceiver, GatewayTable, PacketMetadata};
 use crate::keys_dir::mac_to_key_name;
 use anyhow::Result;
 use gateway_rs::{
@@ -84,6 +84,15 @@ impl UdpDispatcher {
             Event::PacketReceived(rxpk, mac) => {
                 let mac_name = mac_to_key_name(&mac);
 
+                // Extract metadata before parsing consumes the rxpk
+                let metadata = PacketMetadata::now(
+                    rxpk.signal_rssi().unwrap_or_else(|| rxpk.channel_rssi()),
+                    rxpk.snr(),
+                    rxpk.frequency(),
+                    rxpk.datarate().to_string(),
+                    rxpk.data().len(),
+                );
+
                 // Get public key for packet parsing
                 let public_key = self.table.get_public_key(mac).await?;
 
@@ -94,6 +103,7 @@ impl UdpDispatcher {
                             .with_label_values(&[&mac_name])
                             .inc();
                         debug!(mac = %mac_name, "received uplink packet");
+                        self.table.record_uplink_metadata(mac, metadata).await;
                         self.table.send_uplink(mac, packet).await?;
                     }
                     Ok(_packet) => {
@@ -164,6 +174,7 @@ impl UdpDispatcher {
             crate::metrics::PACKETS_DOWNLINK
                 .with_label_values(&[&mac_name])
                 .inc();
+            self.table.record_downlink_event(downlink.mac).await;
         }
     }
 }
