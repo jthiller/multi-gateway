@@ -157,7 +157,11 @@ pub enum GatewayEvent {
         metadata: PacketMetadata,
     },
     #[serde(rename = "downlink")]
-    Downlink { mac: String, region: String },
+    Downlink {
+        mac: String,
+        region: String,
+        metadata: PacketMetadata,
+    },
 }
 
 /// Downlink message to be sent back to a specific gateway
@@ -622,15 +626,17 @@ impl GatewayTable {
     }
 
     /// Record a downlink and broadcast event
-    pub async fn record_downlink_event(&self, mac: MacAddress) {
+    pub async fn record_downlink_event(&self, mac: MacAddress, metadata: PacketMetadata) {
         let mac_name = mac_to_key_name(&mac);
         let _ = self.event_tx.send(GatewayEvent::Downlink {
             mac: mac_name,
             region: self.region.clone(),
+            metadata: metadata.clone(),
         });
         let mut entries = self.entries.write().await;
         if let Some(entry) = entries.get_mut(&mac) {
             entry.record_downlink();
+            entry.record_uplink(metadata); // store in ring buffer for /packets endpoint
         }
     }
 

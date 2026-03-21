@@ -167,6 +167,14 @@ impl UdpDispatcher {
             }
         };
 
+        let metadata = PacketMetadata::from_rxpk_data(
+            0, // no RSSI for downlinks
+            0.0,
+            txpk.freq,
+            txpk.datr.to_string(),
+            txpk.data.as_ref(),
+        );
+
         let prepared = self.udp_runtime.prepare_downlink(txpk, downlink.mac);
         if let Err(e) = prepared.dispatch(None).await {
             warn!(mac = %mac_name, error = %e, "failed to send downlink");
@@ -174,7 +182,9 @@ impl UdpDispatcher {
             crate::metrics::PACKETS_DOWNLINK
                 .with_label_values(&[&mac_name])
                 .inc();
-            self.table.record_downlink_event(downlink.mac).await;
+            self.table
+                .record_downlink_event(downlink.mac, metadata)
+                .await;
         }
     }
 }
