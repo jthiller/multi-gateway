@@ -82,16 +82,17 @@ impl PacketMetadata {
 #[serde(tag = "type")]
 pub enum GatewayEvent {
     #[serde(rename = "gateway_connect")]
-    Connect { mac: String },
+    Connect { mac: String, region: String },
     #[serde(rename = "gateway_disconnect")]
-    Disconnect { mac: String },
+    Disconnect { mac: String, region: String },
     #[serde(rename = "uplink")]
     Uplink {
         mac: String,
+        region: String,
         metadata: PacketMetadata,
     },
     #[serde(rename = "downlink")]
-    Downlink { mac: String },
+    Downlink { mac: String, region: String },
 }
 
 /// Downlink message to be sent back to a specific gateway
@@ -320,6 +321,7 @@ impl GatewayEntry {
 pub struct GatewayInfo {
     pub mac: String,
     pub public_key: String,
+    pub region: String,
     pub connected: bool,
     pub connected_seconds: Option<u64>,
     pub last_uplink_seconds_ago: Option<u64>,
@@ -327,11 +329,12 @@ pub struct GatewayInfo {
     pub downlink_count: u64,
 }
 
-impl From<&GatewayEntry> for GatewayInfo {
-    fn from(entry: &GatewayEntry) -> Self {
+impl GatewayInfo {
+    fn from_entry(entry: &GatewayEntry, region: &str) -> Self {
         Self {
             mac: mac_to_key_name(&entry.mac),
             public_key: entry.public_key().to_string(),
+            region: region.to_string(),
             connected: entry.connected,
             connected_seconds: entry.connection_duration().map(|d| d.as_secs()),
             last_uplink_seconds_ago: entry.time_since_last_uplink().map(|d| d.as_secs()),
@@ -357,6 +360,8 @@ pub struct GatewayTable {
     shutdown: triggered::Listener,
     /// Broadcast channel for real-time events (SSE)
     event_tx: broadcast::Sender<GatewayEvent>,
+    /// LoRaWAN region for this instance
+    region: String,
 }
 
 impl GatewayTable {
@@ -367,6 +372,7 @@ impl GatewayTable {
         queue_size: u16,
         downlink_tx: DownlinkSender,
         shutdown: triggered::Listener,
+        region: String,
     ) -> Result<Self> {
         let (event_tx, _) = broadcast::channel(1024);
         let table = Self {
@@ -377,6 +383,7 @@ impl GatewayTable {
             downlink_tx,
             shutdown,
             event_tx,
+            region,
         };
 
         // Load existing keys
@@ -435,6 +442,7 @@ impl GatewayTable {
 
         let _ = self.event_tx.send(GatewayEvent::Connect {
             mac: mac_to_key_name(&mac),
+            region: self.region.clone(),
         });
 
         Ok(())
@@ -448,6 +456,7 @@ impl GatewayTable {
         }
         let _ = self.event_tx.send(GatewayEvent::Disconnect {
             mac: mac_to_key_name(&mac),
+            region: self.region.clone(),
         });
     }
 
@@ -507,13 +516,18 @@ impl GatewayTable {
     /// Get info for all gateways (for API)
     pub async fn list_gateways(&self) -> Vec<GatewayInfo> {
         let entries = self.entries.read().await;
-        entries.values().map(GatewayInfo::from).collect()
+        entries
+            .values()
+            .map(|e| GatewayInfo::from_entry(e, &self.region))
+            .collect()
     }
 
     /// Get info for a specific gateway
     pub async fn get_gateway(&self, mac: &MacAddress) -> Option<GatewayInfo> {
         let entries = self.entries.read().await;
-        entries.get(mac).map(GatewayInfo::from)
+        entries
+            .get(mac)
+            .map(|e| GatewayInfo::from_entry(e, &self.region))
     }
 
     /// Sign data using a gateway's keypair
@@ -533,6 +547,7 @@ impl GatewayTable {
         let mac_name = mac_to_key_name(&mac);
         let _ = self.event_tx.send(GatewayEvent::Uplink {
             mac: mac_name,
+            region: self.region.clone(),
             metadata: metadata.clone(),
         });
         let mut entries = self.entries.write().await;
@@ -544,7 +559,10 @@ impl GatewayTable {
     /// Record a downlink and broadcast event
     pub async fn record_downlink_event(&self, mac: MacAddress) {
         let mac_name = mac_to_key_name(&mac);
-        let _ = self.event_tx.send(GatewayEvent::Downlink { mac: mac_name });
+        let _ = self.event_tx.send(GatewayEvent::Downlink {
+            mac: mac_name,
+            region: self.region.clone(),
+        });
         let mut entries = self.entries.write().await;
         if let Some(entry) = entries.get_mut(&mac) {
             entry.record_downlink();

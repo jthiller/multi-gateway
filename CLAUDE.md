@@ -75,12 +75,12 @@ Cannot build the musl target on macOS — the `ring` crate requires `x86_64-linu
 - **OS:** Ubuntu 24.04 LTS
 - **DNS:** `hotspot.heliumtools.org` → `34.83.207.25` (Cloudflare, DNS only / gray cloud — required for UDP)
 
-**Credentials:** API keys stored in `.env` (gitignored). Settings on VM at `/etc/helium-multi-gateway/settings.toml`.
+**Credentials:** API keys stored in `.env` (gitignored).
 
-**Ports:**
-- UDP 1680 — US915 gateways (GWMP)
-- TCP 4468 — US915 REST API
-- Additional regions use sequential ports (1681/4469 for EU868, 1682/4470 for AU915, etc.)
+**Active instances:**
+- **US915:** UDP 1680, API 4468, config `/etc/helium-multi-gateway/us915/settings.toml`, keys `/var/lib/helium-multi-gateway/keys/us915/`
+- **EU868:** UDP 1681, API 4469, config `/etc/helium-multi-gateway/eu868/settings.toml`, keys `/var/lib/helium-multi-gateway/keys/eu868/`
+- Additional regions use sequential ports (1682/4470 for AU915, etc.)
 
 **Firewall rules:** `allow-helium-udp` (UDP 1680-1682), `allow-helium-api` (TCP 4468-4470).
 
@@ -97,5 +97,5 @@ Cannot build the musl target on macOS — the `ring` crate requires `x86_64-linu
 gh release download <tag> --dir /tmp/helium-gw-release
 gcloud compute scp /tmp/helium-gw-release/*.deb helium-multi-gw:~/ --zone=us-west1-b --project=helium-multi-gateway
 gcloud compute ssh helium-multi-gw --zone=us-west1-b --project=helium-multi-gateway \
-  --command="sudo dpkg -i ~/helium-multi-gateway_*.deb && sudo systemctl restart helium-multi-gateway"
+  --command="sudo dpkg -i ~/helium-multi-gateway_*.deb && sudo systemctl restart helium-multi-gateway@us915 helium-multi-gateway@eu868"
 ```

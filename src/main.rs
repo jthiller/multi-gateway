@@ -196,6 +196,7 @@ async fn run(settings: Settings) -> Result<()> {
             settings.router.queue,
             downlink_tx,
             shutdown_listener.clone(),
+            settings.region.clone(),
         )
         .await?,
     );
