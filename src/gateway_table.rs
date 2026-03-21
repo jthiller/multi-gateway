@@ -30,6 +30,20 @@ use tracing::{debug, info, warn};
 const STORE_GC_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_RECENT_PACKETS: usize = 50;
 
+/// LoRaWAN frame type parsed from MHDR
+#[derive(Debug, Clone, Serialize)]
+pub enum FrameType {
+    JoinRequest,
+    JoinAccept,
+    UnconfirmedUp,
+    UnconfirmedDown,
+    ConfirmedUp,
+    ConfirmedDown,
+    RejoinRequest,
+    Proprietary,
+    Unknown,
+}
+
 /// Metadata for a single received packet
 #[derive(Debug, Clone, Serialize)]
 pub struct PacketMetadata {
@@ -40,27 +54,90 @@ pub struct PacketMetadata {
     pub payload_size: usize,
     /// Unix timestamp in milliseconds
     pub timestamp: u64,
+    pub frame_type: FrameType,
+    /// DevAddr as hex string (data frames only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dev_addr: Option<String>,
+    /// Frame counter (data frames only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fcnt: Option<u16>,
+    /// FPort (data frames only, absent if no payload)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fport: Option<u8>,
+}
+
+/// Parse LoRaWAN frame header fields from raw PHY payload
+fn parse_lorawan_frame(data: &[u8]) -> (FrameType, Option<String>, Option<u16>, Option<u8>) {
+    if data.is_empty() {
+        return (FrameType::Unknown, None, None, None);
+    }
+
+    let mtype = (data[0] >> 5) & 0x07;
+    let frame_type = match mtype {
+        0 => FrameType::JoinRequest,
+        1 => FrameType::JoinAccept,
+        2 => FrameType::UnconfirmedUp,
+        3 => FrameType::UnconfirmedDown,
+        4 => FrameType::ConfirmedUp,
+        5 => FrameType::ConfirmedDown,
+        6 => FrameType::RejoinRequest,
+        7 => FrameType::Proprietary,
+        _ => FrameType::Unknown,
+    };
+
+    // Data frames (MType 2-5) have: MHDR(1) + DevAddr(4) + FCtrl(1) + FCnt(2) + [FOpts] + [FPort]
+    let is_data_frame = (2..=5).contains(&mtype);
+    if !is_data_frame || data.len() < 8 {
+        return (frame_type, None, None, None);
+    }
+
+    // DevAddr is 4 bytes little-endian starting at offset 1
+    let dev_addr = format!(
+        "{:02X}{:02X}{:02X}{:02X}",
+        data[4], data[3], data[2], data[1]
+    );
+
+    // FCtrl at offset 5, FCnt at offset 6-7 (little-endian)
+    let fctrl = data[5];
+    let fopts_len = (fctrl & 0x0F) as usize;
+    let fcnt = u16::from_le_bytes([data[6], data[7]]);
+
+    // FPort is at offset 8 + FOpts length, if there's payload remaining
+    let fport_offset = 8 + fopts_len;
+    let fport = if data.len() > fport_offset + 4 {
+        // +4 for MIC at end
+        Some(data[fport_offset])
+    } else {
+        None
+    };
+
+    (frame_type, Some(dev_addr), Some(fcnt), fport)
 }
 
 impl PacketMetadata {
-    pub fn now(
+    pub fn from_rxpk_data(
         rssi: i32,
         snr: f32,
         frequency: f64,
         spreading_factor: String,
-        payload_size: usize,
+        payload: &[u8],
     ) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let (frame_type, dev_addr, fcnt, fport) = parse_lorawan_frame(payload);
         Self {
             rssi,
             snr,
             frequency,
             spreading_factor,
-            payload_size,
+            payload_size: payload.len(),
             timestamp,
+            frame_type,
+            dev_addr,
+            fcnt,
+            fport,
         }
     }
 }

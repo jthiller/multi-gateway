@@ -85,12 +85,12 @@ impl UdpDispatcher {
                 let mac_name = mac_to_key_name(&mac);
 
                 // Extract metadata before parsing consumes the rxpk
-                let metadata = PacketMetadata::now(
+                let metadata = PacketMetadata::from_rxpk_data(
                     rxpk.signal_rssi().unwrap_or_else(|| rxpk.channel_rssi()),
                     rxpk.snr(),
                     rxpk.frequency(),
                     rxpk.datarate().to_string(),
-                    rxpk.data().len(),
+                    rxpk.data(),
                 );
 
                 // Get public key for packet parsing
