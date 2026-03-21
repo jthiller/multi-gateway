@@ -38,7 +38,8 @@ pub struct PacketMetadata {
     pub frequency: f64,
     pub spreading_factor: String,
     pub payload_size: usize,
-    pub timestamp: String,
+    /// Unix timestamp in milliseconds
+    pub timestamp: u64,
 }
 
 impl PacketMetadata {
@@ -51,21 +52,8 @@ impl PacketMetadata {
     ) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| {
-                let secs = d.as_secs();
-                let millis = d.subsec_millis();
-                format!(
-                    "{}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-                    1970 + secs / 31_557_600,
-                    (secs % 31_557_600) / 2_629_800 + 1,
-                    (secs % 2_629_800) / 86400 + 1,
-                    (secs % 86400) / 3600,
-                    (secs % 3600) / 60,
-                    secs % 60,
-                    millis,
-                )
-            })
-            .unwrap_or_default();
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         Self {
             rssi,
             snr,
