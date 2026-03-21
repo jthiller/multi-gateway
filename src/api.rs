@@ -28,6 +28,7 @@ use std::sync::{
     Arc,
 };
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 /// Maximum concurrent SSE connections
@@ -135,8 +136,11 @@ pub fn create_router(
         .route("/gateways/{mac}/sign", post(sign_data))
         .layer(middleware::from_fn_with_state(state.clone(), write_auth));
 
-    // SSE events endpoint — public, no auth, connection-limited
-    let public_routes = Router::new().route("/events", get(events_handler));
+    // SSE events endpoint — public, no auth, connection-limited, CORS open
+    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any);
+    let public_routes = Router::new()
+        .route("/events", get(events_handler))
+        .layer(cors);
 
     read_routes
         .merge(write_routes)

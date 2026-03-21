@@ -1087,6 +1087,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "tower-http",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
