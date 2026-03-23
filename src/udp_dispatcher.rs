@@ -140,6 +140,9 @@ impl UdpDispatcher {
                     txnb = stat.txnb,
                     "gateway stats received"
                 );
+                if let (Some(lat), Some(long)) = (stat.lati, stat.long) {
+                    self.table.update_location(mac, lat, long, stat.alti).await;
+                }
             }
 
             Event::UnableToParseUdpFrame(err, _buf) => {

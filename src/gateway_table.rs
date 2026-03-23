@@ -28,7 +28,7 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 const STORE_GC_INTERVAL: Duration = Duration::from_secs(60);
-const MAX_RECENT_PACKETS: usize = 50;
+const MAX_RECENT_PACKETS: usize = 200;
 
 /// LoRaWAN frame type parsed from MHDR
 #[derive(Debug, Clone, Serialize)]
@@ -209,6 +209,12 @@ pub struct GatewayEntry {
     uplink_count: u64,
     /// Total downlink packets sent
     downlink_count: u64,
+    /// GPS latitude from STAT packets
+    latitude: Option<f64>,
+    /// GPS longitude from STAT packets
+    longitude: Option<f64>,
+    /// GPS altitude in meters from STAT packets
+    altitude: Option<i64>,
 }
 
 impl GatewayEntry {
@@ -225,6 +231,9 @@ impl GatewayEntry {
             recent_packets: VecDeque::with_capacity(MAX_RECENT_PACKETS),
             uplink_count: 0,
             downlink_count: 0,
+            latitude: None,
+            longitude: None,
+            altitude: None,
         }
     }
 
@@ -396,6 +405,12 @@ pub struct GatewayInfo {
     pub last_uplink_seconds_ago: Option<u64>,
     pub uplink_count: u64,
     pub downlink_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latitude: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub longitude: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub altitude: Option<i64>,
 }
 
 impl GatewayInfo {
@@ -409,6 +424,9 @@ impl GatewayInfo {
             last_uplink_seconds_ago: entry.time_since_last_uplink().map(|d| d.as_secs()),
             uplink_count: entry.uplink_count,
             downlink_count: entry.downlink_count,
+            latitude: entry.latitude,
+            longitude: entry.longitude,
+            altitude: entry.altitude,
         }
     }
 }
@@ -646,6 +664,16 @@ impl GatewayTable {
         entries
             .get(mac)
             .map(|entry| entry.recent_packets.iter().cloned().collect())
+    }
+
+    /// Update gateway location from STAT packet GPS data
+    pub async fn update_location(&self, mac: MacAddress, lat: f64, long: f64, alt: Option<i64>) {
+        let mut entries = self.entries.write().await;
+        if let Some(entry) = entries.get_mut(&mac) {
+            entry.latitude = Some(lat);
+            entry.longitude = Some(long);
+            entry.altitude = alt;
+        }
     }
 }
 
