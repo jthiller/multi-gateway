@@ -80,7 +80,8 @@ Cannot build the musl target on macOS — the `ring` crate requires `x86_64-linu
 **Active instances:**
 - **US915:** UDP 1680, API 4468, config `/etc/helium-multi-gateway/us915/settings.toml`, keys `/var/lib/helium-multi-gateway/keys/us915/`
 - **EU868:** UDP 1681, API 4469, config `/etc/helium-multi-gateway/eu868/settings.toml`, keys `/var/lib/helium-multi-gateway/keys/eu868/`
-- Additional regions use sequential ports (1682/4470 for AU915, etc.)
+- **AU915:** UDP 1682, API 4470, config `/etc/helium-multi-gateway/au915/settings.toml`, keys `/var/lib/helium-multi-gateway/keys/au915/`
+- Additional regions use sequential ports (1683/4471 for AS923_1, etc.)
 
 **Firewall rules:** `allow-helium-udp` (UDP 1680-1682), `allow-helium-api` (TCP 4468-4470).
 
@@ -97,5 +98,5 @@ Cannot build the musl target on macOS — the `ring` crate requires `x86_64-linu
 gh release download <tag> --dir /tmp/helium-gw-release
 gcloud compute scp /tmp/helium-gw-release/*.deb helium-multi-gw:~/ --zone=us-west1-b --project=helium-multi-gateway
 gcloud compute ssh helium-multi-gw --zone=us-west1-b --project=helium-multi-gateway \
-  --command="sudo dpkg -i ~/helium-multi-gateway_*.deb && sudo systemctl restart helium-multi-gateway@us915 helium-multi-gateway@eu868"
+  --command="sudo dpkg -i ~/helium-multi-gateway_*.deb && sudo systemctl restart helium-multi-gateway@us915 helium-multi-gateway@eu868 helium-multi-gateway@au915"
 ```
