@@ -69,34 +69,18 @@ Cannot build the musl target on macOS — the `ring` crate requires `x86_64-linu
 
 ## Deployment
 
-**GCP Project:** `helium-multi-gateway`
-- **VM:** `helium-multi-gw`, e2-micro in `us-west1-b` (Oregon, close to AWS us-west-2 for low latency to Helium router)
-- **Static IP:** `34.83.207.25` (reserved as `helium-gw-ip` in us-west1)
-- **OS:** Ubuntu 24.04 LTS
-- **DNS:** `hotspot.heliumtools.org` → `34.83.207.25` (Cloudflare, DNS only / gray cloud — required for UDP)
+**Release artifacts:** `.deb` packages built by GitHub Actions on version tags (`v*`). Install with `sudo dpkg -i helium-multi-gateway_*.deb`.
 
-**Credentials:** API keys stored in `.env` (gitignored).
+**Multi-region:** Run one instance per LoRaWAN region on sequential port pairs. Use systemd template units (`helium-multi-gateway@<region>.service`) with per-region config dirs:
 
-**Active instances:**
-- **US915:** UDP 1680, API 4468, config `/etc/helium-multi-gateway/us915/settings.toml`, keys `/var/lib/helium-multi-gateway/keys/us915/`
-- **EU868:** UDP 1681, API 4469, config `/etc/helium-multi-gateway/eu868/settings.toml`, keys `/var/lib/helium-multi-gateway/keys/eu868/`
-- **AU915:** UDP 1682, API 4470, config `/etc/helium-multi-gateway/au915/settings.toml`, keys `/var/lib/helium-multi-gateway/keys/au915/`
-- Additional regions use sequential ports (1683/4471 for AS923_1, etc.)
+| Region | UDP Port | API Port |
+|---|---|---|
+| US915 | 1680 | 4468 |
+| EU868 | 1681 | 4469 |
+| AU915 | 1682 | 4470 |
 
-**Firewall rules:** `allow-helium-udp` (UDP 1680-1682), `allow-helium-api` (TCP 4468-4470).
+Each instance gets its own `settings.toml` and keys directory under `/etc/helium-multi-gateway/<region>/` and `/var/lib/helium-multi-gateway/keys/<region>/`.
 
-**Multi-region:** Uses systemd template units (`helium-multi-gateway@<region>.service`) with per-region config dirs under `/etc/helium-multi-gateway/<region>/settings.toml` and separate key dirs under `/var/lib/helium-multi-gateway/keys/<region>/`.
+**Keypair backups:** Gateway keypairs should be backed up regularly. Keypair loss requires re-provisioning on the Helium network.
 
-**Backups:** Gateway keypairs backed up daily (3am UTC) to `gs://helium-multi-gateway-backups` via cron. 7-day lifecycle policy. Keypair loss requires re-provisioning on the Helium network.
-
-**Monitoring:** GCP Ops Agent ships journald logs to Cloud Logging. Uptime check `helium-gw-health` pings `/metrics` on port 4468 every 5 minutes.
-
-**Release artifacts:** `.deb` packages built by GitHub Actions on version tags (`v*`), downloaded via `gh release download`.
-
-**Deploying updates:**
-```bash
-gh release download <tag> --dir /tmp/helium-gw-release
-gcloud compute scp /tmp/helium-gw-release/*.deb helium-multi-gw:~/ --zone=us-west1-b --project=helium-multi-gateway
-gcloud compute ssh helium-multi-gw --zone=us-west1-b --project=helium-multi-gateway \
-  --command="sudo dpkg -i ~/helium-multi-gateway_*.deb && sudo systemctl restart helium-multi-gateway@us915 helium-multi-gateway@eu868 helium-multi-gateway@au915"
-```
+**Operator-specific deployment details** (IPs, DNS, credentials, cloud project info) belong in `.env` or a local `DEPLOY.md`, both of which are gitignored.
