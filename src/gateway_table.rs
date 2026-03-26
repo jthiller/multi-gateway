@@ -723,12 +723,22 @@ async fn run_gateway_router(
                 match msg {
                     Some(UplinkMessage { packet, received }) => {
                         store.push_back(packet, received);
-                        if service.is_connected()
-                            && send_waiting_packets(&mac_name, &mut service, &mut store).await.is_err()
-                        {
-                            service.disconnect();
-                            warn!(mac = %mac_name, "router disconnected");
-                            reconnect.update_next_time(true);
+                        if service.is_connected() {
+                            if send_waiting_packets(&mac_name, &mut service, &mut store).await.is_err() {
+                                service.disconnect();
+                                warn!(mac = %mac_name, "router disconnected while sending");
+                                reconnect.update_next_time(true);
+                            }
+                        } else if reconnect.wait().is_elapsed() {
+                            // Service is disconnected and backoff has elapsed —
+                            // proactively reconnect instead of waiting for the
+                            // select! to pick the reconnect branch (which can be
+                            // starved by a steady stream of uplinks).
+                            let reconnect_result = service.reconnect().await;
+                            reconnect.update_next_time(reconnect_result.is_err());
+                            if reconnect_result.is_ok() {
+                                debug!(mac = %mac_name, "reconnected to router (proactive)");
+                            }
                         }
                     }
                     None => {
