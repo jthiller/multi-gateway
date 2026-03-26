@@ -734,10 +734,15 @@ async fn run_gateway_router(
                             // proactively reconnect instead of waiting for the
                             // select! to pick the reconnect branch (which can be
                             // starved by a steady stream of uplinks).
-                            let reconnect_result = service.reconnect().await;
-                            reconnect.update_next_time(reconnect_result.is_err());
-                            if reconnect_result.is_ok() {
-                                debug!(mac = %mac_name, "reconnected to router (proactive)");
+                            match service.reconnect().await {
+                                Ok(()) => {
+                                    debug!(mac = %mac_name, "reconnected to router (proactive)");
+                                    reconnect.update_next_time(false);
+                                }
+                                Err(err) => {
+                                    warn!(mac = %mac_name, error = %err, "failed to reconnect (proactive)");
+                                    reconnect.update_next_time(true);
+                                }
                             }
                         }
                     }
