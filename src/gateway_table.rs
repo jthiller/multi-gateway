@@ -695,6 +695,24 @@ fn parse_mac_from_name(name: &str) -> Option<MacAddress> {
     Some(MacAddress::from(arr))
 }
 
+/// Attempt to reconnect to the packet router, updating backoff and logging.
+async fn try_reconnect(
+    mac_name: &str,
+    service: &mut PacketRouterService,
+    reconnect: &mut Reconnect,
+) {
+    match service.reconnect().await {
+        Ok(()) => {
+            debug!(mac = %mac_name, "reconnected to router");
+            reconnect.update_next_time(false);
+        }
+        Err(err) => {
+            warn!(mac = %mac_name, error = %err, "failed to reconnect");
+            reconnect.update_next_time(true);
+        }
+    }
+}
+
 /// Run the packet router loop for a single gateway
 async fn run_gateway_router(
     mac: MacAddress,
@@ -734,16 +752,7 @@ async fn run_gateway_router(
                             // proactively reconnect instead of waiting for the
                             // select! to pick the reconnect branch (which can be
                             // starved by a steady stream of uplinks).
-                            match service.reconnect().await {
-                                Ok(()) => {
-                                    debug!(mac = %mac_name, "reconnected to router (proactive)");
-                                    reconnect.update_next_time(false);
-                                }
-                                Err(err) => {
-                                    warn!(mac = %mac_name, error = %err, "failed to reconnect (proactive)");
-                                    reconnect.update_next_time(true);
-                                }
-                            }
+                            try_reconnect(&mac_name, &mut service, &mut reconnect).await;
                         }
                     }
                     None => {
@@ -754,16 +763,7 @@ async fn run_gateway_router(
             }
 
             _ = reconnect.wait() => {
-                let reconnect_result = service.reconnect().await;
-                reconnect.update_next_time(reconnect_result.is_err());
-                match reconnect_result {
-                    Ok(()) => {
-                        debug!(mac = %mac_name, "reconnected to router");
-                    }
-                    Err(err) => {
-                        warn!(mac = %mac_name, error = %err, "failed to reconnect");
-                    }
-                }
+                try_reconnect(&mac_name, &mut service, &mut reconnect).await;
             }
 
             router_msg = service.recv() => {
