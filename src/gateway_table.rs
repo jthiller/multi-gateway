@@ -453,6 +453,16 @@ pub struct GatewayTable {
     region: String,
 }
 
+/// Result of creating an add-gateway transaction
+pub struct AddGatewayResult {
+    /// Full encoded transaction (with signature)
+    pub encoded: Vec<u8>,
+    /// Unsigned message (signature field cleared)
+    pub unsigned_msg: Vec<u8>,
+    /// Gateway signature
+    pub signature: Vec<u8>,
+}
+
 impl GatewayTable {
     /// Create a new gateway table and load existing keys
     pub async fn new(
@@ -669,14 +679,12 @@ impl GatewayTable {
     }
 
     /// Create and sign an add-gateway transaction for a specific gateway.
-    /// The transaction is signed with the gateway's keypair. The owner/payer
-    /// must co-sign via the Helium Wallet App before submitting on-chain.
     pub async fn create_add_gateway_txn(
         &self,
         mac: &MacAddress,
         owner: Vec<u8>,
         payer: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<AddGatewayResult>> {
         let entries = self.entries.read().await;
         let entry = match entries.get(mac) {
             Some(e) => e,
@@ -690,15 +698,23 @@ impl GatewayTable {
             ..Default::default()
         };
 
-        let signature = entry.keypair.sign(&txn.encode_to_vec())?;
-        txn.gateway_signature = signature;
+        // Get unsigned message first
+        let unsigned_msg = txn.encode_to_vec();
+
+        // Sign it
+        let signature = entry.keypair.sign(&unsigned_msg)?;
+        txn.gateway_signature = signature.clone();
 
         let encoded = BlockchainTxn {
             txn: Some(Txn::AddGateway(txn)),
         }
         .encode_to_vec();
 
-        Ok(Some(encoded))
+        Ok(Some(AddGatewayResult {
+            encoded,
+            unsigned_msg,
+            signature,
+        }))
     }
 
     /// Update gateway location from STAT packet GPS data

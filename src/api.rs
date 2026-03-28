@@ -73,6 +73,10 @@ pub struct AddGatewayResponse {
     pub txn: String,
     /// Gateway public key
     pub gateway: String,
+    /// Hex-encoded unsigned add-gateway message (signature removed)
+    pub unsigned_msg: String,
+    /// Hex-encoded gateway signature
+    pub gateway_signature: String,
 }
 
 /// Request body for signing
@@ -360,11 +364,21 @@ async fn add_gateway(
         .create_add_gateway_txn(&mac_addr, owner, payer)
         .await
     {
-        Ok(Some(txn)) => {
+        Ok(Some(result)) => {
             let gateway_info = state.table.get_gateway(&mac_addr).await;
             Ok(Json(AddGatewayResponse {
-                txn: BASE64.encode(&txn),
+                txn: BASE64.encode(&result.encoded),
                 gateway: gateway_info.map(|g| g.public_key).unwrap_or_default(),
+                unsigned_msg: result
+                    .unsigned_msg
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+                gateway_signature: result
+                    .signature
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
             }))
         }
         Ok(None) => Err((
