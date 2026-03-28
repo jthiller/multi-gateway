@@ -57,6 +57,24 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Request body for add gateway transaction
+#[derive(Deserialize)]
+pub struct AddGatewayRequest {
+    /// Solana address of the owner (base58)
+    pub owner: String,
+    /// Solana address of the payer (base58)
+    pub payer: String,
+}
+
+/// Response body for add gateway transaction
+#[derive(Serialize)]
+pub struct AddGatewayResponse {
+    /// Base64-encoded signed transaction
+    pub txn: String,
+    /// Gateway public key
+    pub gateway: String,
+}
+
 /// Request body for signing
 #[derive(Deserialize)]
 pub struct SignRequest {
@@ -134,6 +152,7 @@ pub fn create_router(
 
     let write_routes = Router::new()
         .route("/gateways/{mac}/sign", post(sign_data))
+        .route("/gateways/{mac}/add", post(add_gateway))
         .layer(middleware::from_fn_with_state(state.clone(), write_auth));
 
     // SSE events endpoint — public, no auth, connection-limited, CORS open
@@ -308,6 +327,59 @@ async fn events_handler(
     });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Create an add-gateway transaction signed by the gateway's keypair
+async fn add_gateway(
+    State(state): State<ApiState>,
+    Path(mac): Path<String>,
+    Json(request): Json<AddGatewayRequest>,
+) -> Result<Json<AddGatewayResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mac_addr = parse_mac(&mac)?;
+
+    // Decode owner and payer from base58
+    let owner = bs58::decode(&request.owner).into_vec().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid owner address (expected base58)".to_string(),
+            }),
+        )
+    })?;
+    let payer = bs58::decode(&request.payer).into_vec().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid payer address (expected base58)".to_string(),
+            }),
+        )
+    })?;
+
+    match state
+        .table
+        .create_add_gateway_txn(&mac_addr, owner, payer)
+        .await
+    {
+        Ok(Some(txn)) => {
+            let gateway_info = state.table.get_gateway(&mac_addr).await;
+            Ok(Json(AddGatewayResponse {
+                txn: BASE64.encode(&txn),
+                gateway: gateway_info.map(|g| g.public_key).unwrap_or_default(),
+            }))
+        }
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Gateway {} not found", mac),
+            }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to create add gateway transaction: {}", e),
+            }),
+        )),
+    }
 }
 
 /// Parse MAC address from hex string

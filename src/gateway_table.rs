@@ -10,7 +10,9 @@ use crate::keys_dir::{mac_to_key_name, KeysDir};
 use anyhow::Result;
 use gateway_rs::{
     helium_crypto::Sign,
-    helium_proto::services::router::envelope_down_v1,
+    helium_proto::{
+        services::router::envelope_down_v1, BlockchainTxn, BlockchainTxnAddGatewayV1, Message, Txn,
+    },
     message_cache::MessageCache,
     semtech_udp::MacAddress,
     service::{packet_router::PacketRouterService, Reconnect},
@@ -664,6 +666,39 @@ impl GatewayTable {
         entries
             .get(mac)
             .map(|entry| entry.recent_packets.iter().cloned().collect())
+    }
+
+    /// Create and sign an add-gateway transaction for a specific gateway.
+    /// The transaction is signed with the gateway's keypair. The owner/payer
+    /// must co-sign via the Helium Wallet App before submitting on-chain.
+    pub async fn create_add_gateway_txn(
+        &self,
+        mac: &MacAddress,
+        owner: Vec<u8>,
+        payer: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        let entries = self.entries.read().await;
+        let entry = match entries.get(mac) {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+
+        let mut txn = BlockchainTxnAddGatewayV1 {
+            gateway: entry.keypair.public_key().to_vec(),
+            owner,
+            payer,
+            ..Default::default()
+        };
+
+        let signature = entry.keypair.sign(&txn.encode_to_vec())?;
+        txn.gateway_signature = signature;
+
+        let encoded = BlockchainTxn {
+            txn: Some(Txn::AddGateway(txn)),
+        }
+        .encode_to_vec();
+
+        Ok(Some(encoded))
     }
 
     /// Update gateway location from STAT packet GPS data

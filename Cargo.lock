@@ -1072,6 +1072,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "bs58",
  "clap",
  "config",
  "futures",
