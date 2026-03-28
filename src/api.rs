@@ -22,6 +22,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures::stream::Stream;
+use gateway_rs::helium_crypto::Verify;
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
@@ -366,6 +367,23 @@ async fn add_gateway(
     {
         Ok(Some(result)) => {
             let gateway_info = state.table.get_gateway(&mac_addr).await;
+
+            // Verify the signature locally as a diagnostic
+            let pubkey = gateway_info
+                .as_ref()
+                .and_then(|g| g.public_key.parse::<gateway_rs::PublicKey>().ok());
+            let sig_valid = pubkey
+                .as_ref()
+                .map(|pk| pk.verify(&result.unsigned_msg, &result.signature).is_ok())
+                .unwrap_or(false);
+
+            tracing::info!(
+                sig_valid,
+                msg_len = result.unsigned_msg.len(),
+                sig_len = result.signature.len(),
+                "add gateway signature verification"
+            );
+
             Ok(Json(AddGatewayResponse {
                 txn: BASE64.encode(&result.encoded),
                 gateway: gateway_info.map(|g| g.public_key).unwrap_or_default(),
