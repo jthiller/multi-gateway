@@ -66,52 +66,12 @@ pub struct PacketMetadata {
     /// FPort (data frames only, absent if no payload)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fport: Option<u8>,
-    /// JoinEUI as colon-separated hex (join request frames only)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub join_eui: Option<String>,
-    /// DevEUI as colon-separated hex (join request frames only)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dev_eui: Option<String>,
-    /// DevNonce as hex string (join request frames only)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dev_nonce: Option<String>,
-}
-
-/// Parsed fields from a LoRaWAN PHY payload
-struct ParsedFrame {
-    frame_type: FrameType,
-    dev_addr: Option<String>,
-    fcnt: Option<u16>,
-    fport: Option<u8>,
-    join_eui: Option<String>,
-    dev_eui: Option<String>,
-    dev_nonce: Option<String>,
-}
-
-/// Format EUI-64 bytes (little-endian in PHY payload) as big-endian colon-separated hex
-fn format_eui(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .rev()
-        .map(|b| format!("{:02X}", b))
-        .collect::<Vec<_>>()
-        .join(":")
 }
 
 /// Parse LoRaWAN frame header fields from raw PHY payload
-fn parse_lorawan_frame(data: &[u8]) -> ParsedFrame {
-    let none_frame = |ft| ParsedFrame {
-        frame_type: ft,
-        dev_addr: None,
-        fcnt: None,
-        fport: None,
-        join_eui: None,
-        dev_eui: None,
-        dev_nonce: None,
-    };
-
+fn parse_lorawan_frame(data: &[u8]) -> (FrameType, Option<String>, Option<u16>, Option<u8>) {
     if data.is_empty() {
-        return none_frame(FrameType::Unknown);
+        return (FrameType::Unknown, None, None, None);
     }
 
     let mtype = (data[0] >> 5) & 0x07;
@@ -127,26 +87,10 @@ fn parse_lorawan_frame(data: &[u8]) -> ParsedFrame {
         _ => FrameType::Unknown,
     };
 
-    // Join Request: MHDR(1) + JoinEUI(8) + DevEUI(8) + DevNonce(2) + MIC(4) = 23 bytes
-    if mtype == 0 && data.len() >= 23 {
-        return ParsedFrame {
-            frame_type,
-            dev_addr: None,
-            fcnt: None,
-            fport: None,
-            join_eui: Some(format_eui(&data[1..9])),
-            dev_eui: Some(format_eui(&data[9..17])),
-            dev_nonce: Some(format!(
-                "0x{:04X}",
-                u16::from_le_bytes([data[17], data[18]])
-            )),
-        };
-    }
-
     // Data frames (MType 2-5) have: MHDR(1) + DevAddr(4) + FCtrl(1) + FCnt(2) + [FOpts] + [FPort]
     let is_data_frame = (2..=5).contains(&mtype);
     if !is_data_frame || data.len() < 8 {
-        return none_frame(frame_type);
+        return (frame_type, None, None, None);
     }
 
     // DevAddr is 4 bytes little-endian starting at offset 1
@@ -169,15 +113,7 @@ fn parse_lorawan_frame(data: &[u8]) -> ParsedFrame {
         None
     };
 
-    ParsedFrame {
-        frame_type,
-        dev_addr: Some(dev_addr),
-        fcnt: Some(fcnt),
-        fport,
-        join_eui: None,
-        dev_eui: None,
-        dev_nonce: None,
-    }
+    (frame_type, Some(dev_addr), Some(fcnt), fport)
 }
 
 impl PacketMetadata {
@@ -192,7 +128,7 @@ impl PacketMetadata {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let parsed = parse_lorawan_frame(payload);
+        let (frame_type, dev_addr, fcnt, fport) = parse_lorawan_frame(payload);
         Self {
             rssi,
             snr,
@@ -200,13 +136,10 @@ impl PacketMetadata {
             spreading_factor,
             payload_size: payload.len(),
             timestamp,
-            frame_type: parsed.frame_type,
-            dev_addr: parsed.dev_addr,
-            fcnt: parsed.fcnt,
-            fport: parsed.fport,
-            join_eui: parsed.join_eui,
-            dev_eui: parsed.dev_eui,
-            dev_nonce: parsed.dev_nonce,
+            frame_type,
+            dev_addr,
+            fcnt,
+            fport,
         }
     }
 }
