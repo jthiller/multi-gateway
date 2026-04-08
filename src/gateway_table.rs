@@ -108,6 +108,14 @@ impl GatewayEntry {
         self.connected
     }
 
+    /// Non-mutating liveness check for read-only contexts (API responses).
+    /// Returns true only if the connected flag is set AND the gRPC task is
+    /// still running. Unlike `is_connected()`, this does not clean up stale
+    /// state — that happens on the next write-lock path (send_uplink, etc.).
+    pub fn appears_connected(&self) -> bool {
+        self.connected && self.task_handle.as_ref().is_some_and(|h| !h.is_finished())
+    }
+
     /// Get connection duration if connected
     pub fn connection_duration(&self) -> Option<Duration> {
         self.connected_since.map(|since| since.elapsed())
@@ -116,38 +124,6 @@ impl GatewayEntry {
     /// Get time since last uplink
     pub fn time_since_last_uplink(&self) -> Option<Duration> {
         self.last_uplink.map(|t| t.elapsed())
-    }
-
-    /// Send an uplink packet.
-    /// Returns false if the task is dead and needs restart.
-    pub async fn send_uplink(&mut self, packet: PacketUp) -> bool {
-        let now = Instant::now();
-        self.last_uplink = Some(now);
-
-        if !self.is_connected() {
-            warn!(mac = %mac_to_key_name(&self.mac), "task dead, cannot send uplink");
-            return false;
-        }
-
-        if let Some(ref tx) = self.uplink_tx {
-            if tx
-                .send(UplinkMessage {
-                    packet,
-                    received: now,
-                })
-                .await
-                .is_err()
-            {
-                let mac_name = mac_to_key_name(&self.mac);
-                warn!(mac = %mac_name, "uplink channel closed, task likely dead");
-                self.connected = false;
-                self.connected_since = None;
-                self.uplink_tx = None;
-                self.task_handle = None;
-                return false;
-            }
-        }
-        true
     }
 
     /// Start the gRPC task for this gateway
@@ -242,7 +218,7 @@ impl From<&GatewayEntry> for GatewayInfo {
         Self {
             mac: mac_to_key_name(&entry.mac),
             public_key: entry.public_key().to_string(),
-            connected: entry.connected,
+            connected: entry.appears_connected(),
             connected_seconds: entry.connection_duration().map(|d| d.as_secs()),
             last_uplink_seconds_ago: entry.time_since_last_uplink().map(|d| d.as_secs()),
         }
@@ -343,39 +319,97 @@ impl GatewayTable {
         }
     }
 
-    /// Send an uplink packet for a gateway
+    /// Send an uplink packet for a gateway.
+    ///
+    /// The write lock is held only for the synchronous phase (liveness check,
+    /// timestamp update, sender clone). The potentially-blocking channel send
+    /// happens **outside** the lock to prevent backpressure from a slow gRPC
+    /// task from stalling the entire gateway table — which would in turn block
+    /// the UDP dispatcher and deadlock the semtech-udp runtime's internal
+    /// bounded channels.
     pub async fn send_uplink(&self, mac: MacAddress, packet: PacketUp) -> Result<()> {
-        let mut entries = self.entries.write().await;
-
-        // Ensure gateway is connected
-        let entry = if let Some(entry) = entries.get_mut(&mac) {
-            entry
-        } else {
-            // Auto-provision if needed
-            let keypair = Arc::new(self.keys_dir.get_or_create(&mac)?);
-            let entry = GatewayEntry::new(mac, keypair);
-            entries.insert(mac, entry);
-            let entry = entries.get_mut(&mac).unwrap();
-            entry.connect(
-                self.router_uri.clone(),
-                self.queue_size,
-                self.downlink_tx.clone(),
-                self.shutdown.clone(),
-            );
-            entry
-        };
-
-        if !entry.send_uplink(packet).await {
-            // Task was dead, restart it
-            let mac_name = mac_to_key_name(&mac);
-            warn!(mac = %mac_name, "restarting dead gRPC task");
-            entry.connect(
-                self.router_uri.clone(),
-                self.queue_size,
-                self.downlink_tx.clone(),
-                self.shutdown.clone(),
-            );
+        // Phase 1: under write lock — check liveness, clone sender
+        enum SendAction {
+            Send(UplinkSender),
+            NeedsRestart,
         }
+
+        let action = {
+            let mut entries = self.entries.write().await;
+
+            let entry = if let Some(entry) = entries.get_mut(&mac) {
+                entry
+            } else {
+                // Auto-provision if needed
+                let keypair = Arc::new(self.keys_dir.get_or_create(&mac)?);
+                let entry = GatewayEntry::new(mac, keypair);
+                entries.insert(mac, entry);
+                let entry = entries.get_mut(&mac).unwrap();
+                entry.connect(
+                    self.router_uri.clone(),
+                    self.queue_size,
+                    self.downlink_tx.clone(),
+                    self.shutdown.clone(),
+                );
+                entry
+            };
+
+            entry.last_uplink = Some(Instant::now());
+
+            if !entry.is_connected() {
+                SendAction::NeedsRestart
+            } else if let Some(tx) = entry.uplink_tx.clone() {
+                SendAction::Send(tx)
+            } else {
+                SendAction::NeedsRestart
+            }
+        };
+        // Write lock dropped here
+
+        // Phase 2: send outside the lock (potentially blocks on bounded channel)
+        match action {
+            SendAction::Send(tx) => {
+                if tx
+                    .send(UplinkMessage {
+                        packet,
+                        received: Instant::now(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    // Channel closed — task died between our check and send
+                    let mac_name = mac_to_key_name(&mac);
+                    warn!(mac = %mac_name, "uplink channel closed during send, restarting task");
+                    let mut entries = self.entries.write().await;
+                    if let Some(entry) = entries.get_mut(&mac) {
+                        entry.connected = false;
+                        entry.connected_since = None;
+                        entry.uplink_tx = None;
+                        entry.task_handle = None;
+                        entry.connect(
+                            self.router_uri.clone(),
+                            self.queue_size,
+                            self.downlink_tx.clone(),
+                            self.shutdown.clone(),
+                        );
+                    }
+                }
+            }
+            SendAction::NeedsRestart => {
+                let mac_name = mac_to_key_name(&mac);
+                warn!(mac = %mac_name, "restarting dead gRPC task");
+                let mut entries = self.entries.write().await;
+                if let Some(entry) = entries.get_mut(&mac) {
+                    entry.connect(
+                        self.router_uri.clone(),
+                        self.queue_size,
+                        self.downlink_tx.clone(),
+                        self.shutdown.clone(),
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 

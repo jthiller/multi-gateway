@@ -7,6 +7,7 @@
 //! - GET /metrics - Prometheus metrics
 
 use crate::gateway_table::GatewayTable;
+use crate::udp_dispatcher::DispatcherHealth;
 use axum::{
     extract::{Path, Request, State},
     http::StatusCode,
@@ -24,8 +25,17 @@ use tracing::info;
 #[derive(Clone)]
 pub struct ApiState {
     pub table: Arc<GatewayTable>,
+    pub dispatcher_health: Arc<DispatcherHealth>,
     pub read_api_key: Option<String>,
     pub write_api_key: Option<String>,
+}
+
+/// Dispatcher health status for API responses
+#[derive(Serialize)]
+pub struct DispatcherStatus {
+    pub last_event_seconds_ago: Option<u64>,
+    pub uptime_seconds: u64,
+    pub events_processed: u64,
 }
 
 /// API response for listing gateways
@@ -34,6 +44,7 @@ pub struct GatewaysResponse {
     pub gateways: Vec<crate::gateway_table::GatewayInfo>,
     pub total: usize,
     pub connected: usize,
+    pub dispatcher: DispatcherStatus,
 }
 
 /// API response for errors
@@ -100,11 +111,13 @@ async fn write_auth(State(state): State<ApiState>, request: Request, next: Next)
 /// Create the API router
 pub fn create_router(
     table: Arc<GatewayTable>,
+    dispatcher_health: Arc<DispatcherHealth>,
     read_api_key: Option<String>,
     write_api_key: Option<String>,
 ) -> Router {
     let state = ApiState {
         table,
+        dispatcher_health,
         read_api_key,
         write_api_key,
     };
@@ -132,11 +145,17 @@ async fn list_gateways(State(state): State<ApiState>) -> Json<GatewaysResponse> 
     let gateways = state.table.list_gateways().await;
     let total = gateways.len();
     let connected = gateways.iter().filter(|g| g.connected).count();
+    let health = &state.dispatcher_health;
 
     Json(GatewaysResponse {
         gateways,
         total,
         connected,
+        dispatcher: DispatcherStatus {
+            last_event_seconds_ago: health.seconds_since_last_event(),
+            uptime_seconds: health.uptime_secs(),
+            events_processed: health.total_events(),
+        },
     })
 }
 
@@ -260,11 +279,12 @@ fn parse_mac(
 pub async fn run_api_server(
     listen_addr: String,
     table: Arc<GatewayTable>,
+    dispatcher_health: Arc<DispatcherHealth>,
     read_api_key: Option<String>,
     write_api_key: Option<String>,
     shutdown: triggered::Listener,
 ) -> anyhow::Result<()> {
-    let app = create_router(table, read_api_key, write_api_key);
+    let app = create_router(table, dispatcher_health, read_api_key, write_api_key);
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     info!(addr = %listen_addr, "API server starting");

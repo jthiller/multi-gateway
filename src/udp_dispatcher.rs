@@ -11,9 +11,71 @@ use gateway_rs::{
     semtech_udp::server_runtime::{Event, UdpRuntime},
     PacketUp, Region,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tracing::{debug, info, warn};
+
+/// Shared dispatcher health state, readable from the API and metrics without
+/// any locking contention with the dispatch loop.
+pub struct DispatcherHealth {
+    /// Unix epoch seconds when the dispatcher was created.
+    started_epoch_secs: u64,
+    /// Unix epoch seconds of the last event processed. 0 until the first event.
+    last_event_epoch_secs: AtomicU64,
+    /// Total events processed (monotonic counter).
+    events_processed: AtomicU64,
+}
+
+impl DispatcherHealth {
+    fn new() -> Self {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self {
+            started_epoch_secs: now,
+            last_event_epoch_secs: AtomicU64::new(0),
+            events_processed: AtomicU64::new(0),
+        }
+    }
+
+    fn record_event(&self) {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.last_event_epoch_secs.store(now, Ordering::Relaxed);
+        self.events_processed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Seconds since the last event was processed, or None if no event yet.
+    pub fn seconds_since_last_event(&self) -> Option<u64> {
+        let last = self.last_event_epoch_secs.load(Ordering::Relaxed);
+        if last == 0 {
+            return None;
+        }
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Some(now.saturating_sub(last))
+    }
+
+    /// Seconds since the dispatcher was created.
+    pub fn uptime_secs(&self) -> u64 {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_sub(self.started_epoch_secs)
+    }
+
+    /// Total events processed.
+    pub fn total_events(&self) -> u64 {
+        self.events_processed.load(Ordering::Relaxed)
+    }
+}
 
 /// Default TX power for downlinks (in dBm)
 const DEFAULT_TX_POWER: u32 = 27;
@@ -24,6 +86,7 @@ pub struct UdpDispatcher {
     table: Arc<GatewayTable>,
     downlink_rx: DownlinkReceiver,
     region: Region,
+    health: Arc<DispatcherHealth>,
 }
 
 impl UdpDispatcher {
@@ -44,7 +107,14 @@ impl UdpDispatcher {
             table,
             downlink_rx,
             region,
+            health: Arc::new(DispatcherHealth::new()),
         })
+    }
+
+    /// Shared health state for the dispatcher, readable from the API and
+    /// metrics without contention.
+    pub fn health(&self) -> Arc<DispatcherHealth> {
+        self.health.clone()
     }
 
     pub async fn run(mut self, shutdown: triggered::Listener) -> Result<()> {
@@ -58,12 +128,14 @@ impl UdpDispatcher {
                 }
 
                 event = self.udp_runtime.recv() => {
+                    self.health.record_event();
                     if let Err(e) = self.handle_event(event).await {
                         warn!(error = %e, "error handling UDP event");
                     }
                 }
 
                 Some(downlink) = self.downlink_rx.recv() => {
+                    self.health.record_event();
                     self.handle_downlink(downlink).await;
                 }
             }
