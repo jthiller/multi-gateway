@@ -230,7 +230,7 @@ impl UdpDispatcher {
         };
 
         let prepared = self.udp_runtime.prepare_downlink(txpk, downlink.mac);
-        if let Err(e) = prepared.dispatch(None).await {
+        if let Err(e) = prepared.dispatch(Some(Duration::from_secs(5))).await {
             warn!(mac = %mac_name, error = %e, "failed to send downlink");
         } else {
             crate::metrics::PACKETS_DOWNLINK
