@@ -220,11 +220,45 @@ async fn run(settings: Settings) -> Result<()> {
         "multi-gateway server starting"
     );
 
+    // Get dispatcher health handle before moving dispatcher into its task
+    let dispatcher_health = dispatcher.health();
+    metrics::set_dispatcher_health(dispatcher_health.clone());
+
+    // Spawn dispatcher health watchdog
+    let watchdog_health = dispatcher_health.clone();
+    let watchdog_shutdown = shutdown_listener.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = watchdog_shutdown.clone() => return,
+                _ = interval.tick() => {
+                    if let Some(secs) = watchdog_health.seconds_since_last_event() {
+                        if secs > 120 {
+                            tracing::error!(
+                                seconds_silent = secs,
+                                "DISPATCHER STALL DETECTED: no events processed for {}s",
+                                secs
+                            );
+                        } else if secs > 60 {
+                            tracing::warn!(
+                                seconds_silent = secs,
+                                "dispatcher has not processed events for {}s",
+                                secs
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // Run UDP dispatcher and API server concurrently
     let dispatcher_handle = tokio::spawn(dispatcher.run(shutdown_listener.clone()));
     let api_handle = tokio::spawn(api::run_api_server(
         settings.api_addr.clone(),
         table.clone(),
+        dispatcher_health,
         settings.read_api_key.clone(),
         settings.write_api_key.clone(),
         shutdown_listener,
