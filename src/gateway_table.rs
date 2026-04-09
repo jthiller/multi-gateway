@@ -883,6 +883,7 @@ async fn run_gateway_router(
                     }
                     Err(err) => {
                         warn!(mac = %mac_name, error = %err, "router error");
+                        service.disconnect();
                         reconnect.update_next_time(true);
                     }
                 }
