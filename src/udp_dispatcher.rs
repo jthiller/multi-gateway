@@ -8,13 +8,25 @@ use crate::gateway_table::{DownlinkMessage, DownlinkReceiver, GatewayTable, Pack
 use crate::keys_dir::mac_to_key_name;
 use anyhow::Result;
 use gateway_rs::{
-    semtech_udp::server_runtime::{Event, Options, UdpRuntime},
+    semtech_udp::{
+        server_runtime::{Event, Options, UdpRuntime},
+        MacAddress,
+    },
     PacketUp, Region,
 };
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, info, warn};
+
+/// Minimum interval between duplicate-client warn logs for the same
+/// (mac, rejected_addr) pair. The metric and API data still update on every
+/// event — only the log is throttled, to keep service logs legible when a
+/// rogue source persistently claims a MAC (observed in production at ~1 hit
+/// every 10s for the lifetime of the service).
+const DUPLICATE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Shared dispatcher health state, readable from the API and metrics without
 /// any locking contention with the dispatch loop.
@@ -87,6 +99,7 @@ pub struct UdpDispatcher {
     downlink_rx: DownlinkReceiver,
     region: Region,
     health: Arc<DispatcherHealth>,
+    duplicate_log_throttle: HashMap<(MacAddress, SocketAddr), Instant>,
 }
 
 impl UdpDispatcher {
@@ -117,6 +130,7 @@ impl UdpDispatcher {
             downlink_rx,
             region,
             health: Arc::new(DispatcherHealth::new()),
+            duplicate_log_throttle: HashMap::new(),
         })
     }
 
@@ -202,13 +216,11 @@ impl UdpDispatcher {
                     .with_label_values(&[&mac_name])
                     .inc();
                 info!(mac = %mac_name, addr = %addr, "gateway disconnected (UDP keepalive timeout)");
-                // This drops the gRPC task via RAII
+                self.duplicate_log_throttle.retain(|(m, _), _| *m != mac);
                 self.table.on_disconnect(mac).await;
             }
 
             Event::UpdateClient((mac, addr)) => {
-                // Unreachable with strict_client_addr=true (the runtime emits
-                // DuplicateClient instead). Kept for exhaustiveness.
                 let mac_name = mac_to_key_name(&mac);
                 debug!(mac = %mac_name, addr = %addr, "gateway source address updated");
             }
@@ -222,12 +234,20 @@ impl UdpDispatcher {
                 crate::metrics::GATEWAY_DUPLICATES
                     .with_label_values(&[&mac_name])
                     .inc();
-                warn!(
-                    mac = %mac_name,
-                    existing = %existing,
-                    rejected = %rejected,
-                    "rejected second gateway claiming MAC already bound to another source; downlinks continue routing to the existing address"
-                );
+                let now = Instant::now();
+                let should_warn = self
+                    .duplicate_log_throttle
+                    .get(&(mac, rejected))
+                    .is_none_or(|t| now.duration_since(*t) >= DUPLICATE_LOG_INTERVAL);
+                if should_warn {
+                    warn!(
+                        mac = %mac_name,
+                        existing = %existing,
+                        rejected = %rejected,
+                        "rejected second gateway claiming MAC already bound to another source; downlinks continue routing to the existing address"
+                    );
+                    self.duplicate_log_throttle.insert((mac, rejected), now);
+                }
                 self.table.record_duplicate_source(mac, rejected).await;
             }
 

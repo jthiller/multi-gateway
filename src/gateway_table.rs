@@ -428,8 +428,7 @@ pub struct GatewayInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_source: Option<String>,
     /// Other sources that tried to use this MAC and were rejected.
-    /// Populated only when conflicts have been observed; UI should render
-    /// an alert when this list is non-empty.
+    /// Empty unless conflicts have been observed during the current session.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub duplicate_sources: Vec<DuplicateSourceInfo>,
 }
