@@ -24,6 +24,16 @@ pub static GATEWAY_DISCONNECTIONS: Lazy<CounterVec> = Lazy::new(|| {
     counter
 });
 
+pub static GATEWAY_DUPLICATES: Lazy<CounterVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "gateway_duplicates_total",
+        "PULL_DATA rejected because the MAC is already bound to another source address",
+    );
+    let counter = CounterVec::new(opts, &["mac"]).unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
 pub static PACKETS_UPLINK: Lazy<CounterVec> = Lazy::new(|| {
     let opts = Opts::new("packets_uplink_total", "Total uplink packets received");
     let counter = CounterVec::new(opts, &["mac"]).unwrap();
@@ -62,6 +72,7 @@ pub fn init() {
     // Access each lazy static to force initialization and registration
     Lazy::force(&GATEWAY_CONNECTIONS);
     Lazy::force(&GATEWAY_DISCONNECTIONS);
+    Lazy::force(&GATEWAY_DUPLICATES);
     Lazy::force(&PACKETS_UPLINK);
     Lazy::force(&PACKETS_DOWNLINK);
     Lazy::force(&DISPATCHER_LAST_EVENT_SECS);

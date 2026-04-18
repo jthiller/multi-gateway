@@ -22,10 +22,13 @@ use http::Uri;
 use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
+    net::SocketAddr,
     ops::Deref,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
+
+const MAX_TRACKED_DUPLICATE_SOURCES: usize = 8;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, warn};
 
@@ -217,6 +220,18 @@ pub struct GatewayEntry {
     longitude: Option<f64>,
     /// GPS altitude in meters from STAT packets
     altitude: Option<i64>,
+    /// Accepted (pinned) source address — set by on_connect.
+    current_source: Option<SocketAddr>,
+    /// Source addresses rejected as duplicates, most-recent first.
+    duplicate_sources: VecDeque<DuplicateSourceRecord>,
+}
+
+/// Record of a source that tried to use a MAC already bound to another source.
+#[derive(Debug, Clone)]
+pub struct DuplicateSourceRecord {
+    pub addr: SocketAddr,
+    pub last_seen: Instant,
+    pub count: u64,
 }
 
 impl GatewayEntry {
@@ -236,7 +251,30 @@ impl GatewayEntry {
             latitude: None,
             longitude: None,
             altitude: None,
+            current_source: None,
+            duplicate_sources: VecDeque::new(),
         }
+    }
+
+    /// Merge a newly-seen duplicate source into the bounded ring.
+    fn record_duplicate_source(&mut self, addr: SocketAddr) {
+        if let Some(existing) = self
+            .duplicate_sources
+            .iter_mut()
+            .find(|r| r.addr == addr)
+        {
+            existing.last_seen = Instant::now();
+            existing.count += 1;
+            return;
+        }
+        if self.duplicate_sources.len() >= MAX_TRACKED_DUPLICATE_SOURCES {
+            self.duplicate_sources.pop_back();
+        }
+        self.duplicate_sources.push_front(DuplicateSourceRecord {
+            addr,
+            last_seen: Instant::now(),
+            count: 1,
+        });
     }
 
     /// Get the gateway's public key
@@ -353,6 +391,8 @@ impl GatewayEntry {
 
             self.connected = false;
             self.connected_since = None;
+            self.current_source = None;
+            self.duplicate_sources.clear();
             self.stop_task();
         }
     }
@@ -389,6 +429,22 @@ pub struct GatewayInfo {
     pub longitude: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub altitude: Option<i64>,
+    /// Currently-bound UDP source address (host:port), if connected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_source: Option<String>,
+    /// Other sources that tried to use this MAC and were rejected.
+    /// Populated only when conflicts have been observed; UI should render
+    /// an alert when this list is non-empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub duplicate_sources: Vec<DuplicateSourceInfo>,
+}
+
+/// API-facing view of a rejected duplicate source.
+#[derive(Debug, Serialize)]
+pub struct DuplicateSourceInfo {
+    pub addr: String,
+    pub count: u64,
+    pub seconds_ago: u64,
 }
 
 impl GatewayInfo {
@@ -405,6 +461,16 @@ impl GatewayInfo {
             latitude: entry.latitude,
             longitude: entry.longitude,
             altitude: entry.altitude,
+            current_source: entry.current_source.map(|a| a.to_string()),
+            duplicate_sources: entry
+                .duplicate_sources
+                .iter()
+                .map(|r| DuplicateSourceInfo {
+                    addr: r.addr.to_string(),
+                    count: r.count,
+                    seconds_ago: r.last_seen.elapsed().as_secs(),
+                })
+                .collect(),
         }
     }
 }
@@ -493,7 +559,7 @@ impl GatewayTable {
     }
 
     /// Handle a gateway connection event
-    pub async fn on_connect(&self, mac: MacAddress) -> Result<()> {
+    pub async fn on_connect(&self, mac: MacAddress, addr: SocketAddr) -> Result<()> {
         let mut entries = self.entries.write().await;
 
         // Get or create entry
@@ -507,7 +573,7 @@ impl GatewayTable {
             entries.get_mut(&mac).unwrap()
         };
 
-        // Start gRPC task if not already connected
+        entry.current_source = Some(addr);
         entry.connect(
             self.router_uri.clone(),
             self.queue_size,
@@ -521,6 +587,17 @@ impl GatewayTable {
         });
 
         Ok(())
+    }
+
+    /// Record a PULL_DATA from a different source address than the one
+    /// currently bound to this MAC. The existing binding is preserved (the
+    /// runtime has already rejected the change); this just captures it for
+    /// observability so the UI can warn.
+    pub async fn record_duplicate_source(&self, mac: MacAddress, rejected: SocketAddr) {
+        let mut entries = self.entries.write().await;
+        if let Some(entry) = entries.get_mut(&mac) {
+            entry.record_duplicate_source(rejected);
+        }
     }
 
     /// Handle a gateway disconnection event

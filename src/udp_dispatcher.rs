@@ -8,7 +8,7 @@ use crate::gateway_table::{DownlinkMessage, DownlinkReceiver, GatewayTable, Pack
 use crate::keys_dir::mac_to_key_name;
 use anyhow::Result;
 use gateway_rs::{
-    semtech_udp::server_runtime::{Event, UdpRuntime},
+    semtech_udp::server_runtime::{Event, Options, UdpRuntime},
     PacketUp, Region,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -98,9 +98,18 @@ impl UdpDispatcher {
         disconnect_timeout: Duration,
     ) -> Result<Self> {
         info!(addr = %listen_addr, disconnect_timeout_secs = disconnect_timeout.as_secs(), "creating UDP dispatcher");
-        let udp_runtime = UdpRuntime::new_with_disconnect_timeout(listen_addr, disconnect_timeout)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to bind UDP socket on {listen_addr}: {e}"))?;
+        // strict_client_addr pins each MAC to the first source that connects.
+        // A second gateway claiming the same MAC is rejected (DuplicateClient)
+        // so downlinks keep routing to the originally-connected gateway.
+        let udp_runtime = UdpRuntime::new_with_options(
+            listen_addr,
+            Options {
+                disconnect_timeout,
+                strict_client_addr: true,
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to bind UDP socket on {listen_addr}: {e}"))?;
 
         Ok(Self {
             udp_runtime,
@@ -150,7 +159,7 @@ impl UdpDispatcher {
                     .with_label_values(&[&mac_name])
                     .inc();
                 info!(mac = %mac_name, addr = %addr, "gateway connected");
-                self.table.on_connect(mac).await?;
+                self.table.on_connect(mac, addr).await?;
             }
 
             Event::PacketReceived(rxpk, mac) => {
@@ -198,13 +207,28 @@ impl UdpDispatcher {
             }
 
             Event::UpdateClient((mac, addr)) => {
-                // Gateway's UDP source address changed. The semtech-udp runtime has
-                // already updated its addr map so downlinks route correctly; the gRPC
-                // task is independent of the UDP source and should not be restarted.
-                // Common causes: Semtech reference packet-forwarders open two sockets
-                // (upstream + downstream), NAT rebinding, or multi-homed gateways.
+                // Unreachable with strict_client_addr=true (the runtime emits
+                // DuplicateClient instead). Kept for exhaustiveness.
                 let mac_name = mac_to_key_name(&mac);
                 debug!(mac = %mac_name, addr = %addr, "gateway source address updated");
+            }
+
+            Event::DuplicateClient {
+                mac,
+                existing,
+                rejected,
+            } => {
+                let mac_name = mac_to_key_name(&mac);
+                crate::metrics::GATEWAY_DUPLICATES
+                    .with_label_values(&[&mac_name])
+                    .inc();
+                warn!(
+                    mac = %mac_name,
+                    existing = %existing,
+                    rejected = %rejected,
+                    "rejected second gateway claiming MAC already bound to another source; downlinks continue routing to the existing address"
+                );
+                self.table.record_duplicate_source(mac, rejected).await;
             }
 
             Event::StatReceived(stat, mac) => {
