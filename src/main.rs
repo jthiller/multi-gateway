@@ -51,7 +51,7 @@ struct SignRequestBody {
 }
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = env!("GIT_VERSION"), about, long_about = None)]
 struct Args {
     /// Path to the settings file
     #[arg(short, long, default_value = "settings.toml")]
@@ -214,6 +214,7 @@ async fn run(settings: Settings) -> Result<()> {
     .await?;
 
     info!(
+        version = env!("GIT_VERSION"),
         udp_addr = %listen_addr,
         api_addr = %settings.api_addr,
         router_uri = %settings.router.uri,

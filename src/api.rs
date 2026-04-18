@@ -173,10 +173,11 @@ pub fn create_router(
         .route("/gateways/{mac}/add", post(add_gateway))
         .layer(middleware::from_fn_with_state(state.clone(), write_auth));
 
-    // SSE events endpoint — public, no auth, connection-limited, CORS open
+    // Public endpoints: CORS-open, no auth. Used by dashboards (version, events).
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any);
     let public_routes = Router::new()
         .route("/events", get(events_handler))
+        .route("/version", get(version_handler))
         .layer(cors);
 
     read_routes
@@ -188,6 +189,19 @@ pub fn create_router(
 /// Prometheus metrics endpoint
 async fn metrics_handler() -> String {
     crate::metrics::gather()
+}
+
+/// Version response
+#[derive(Serialize)]
+pub struct VersionResponse {
+    pub version: &'static str,
+}
+
+/// Public version endpoint
+async fn version_handler() -> Json<VersionResponse> {
+    Json(VersionResponse {
+        version: env!("GIT_VERSION"),
+    })
 }
 
 /// List all gateways
