@@ -27,13 +27,12 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
-
-const MAX_TRACKED_DUPLICATE_SOURCES: usize = 8;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 const STORE_GC_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_RECENT_PACKETS: usize = 200;
+const MAX_TRACKED_DUPLICATE_SOURCES: usize = 8;
 
 /// LoRaWAN frame type parsed from MHDR
 #[derive(Debug, Clone, Serialize)]
@@ -258,11 +257,7 @@ impl GatewayEntry {
 
     /// Merge a newly-seen duplicate source into the bounded ring.
     fn record_duplicate_source(&mut self, addr: SocketAddr) {
-        if let Some(existing) = self
-            .duplicate_sources
-            .iter_mut()
-            .find(|r| r.addr == addr)
-        {
+        if let Some(existing) = self.duplicate_sources.iter_mut().find(|r| r.addr == addr) {
             existing.last_seen = Instant::now();
             existing.count += 1;
             return;
