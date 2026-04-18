@@ -188,9 +188,13 @@ impl UdpDispatcher {
             }
 
             Event::UpdateClient((mac, addr)) => {
+                // Gateway's UDP source address changed. The semtech-udp runtime has
+                // already updated its addr map so downlinks route correctly; the gRPC
+                // task is independent of the UDP source and should not be restarted.
+                // Common causes: Semtech reference packet-forwarders open two sockets
+                // (upstream + downstream), NAT rebinding, or multi-homed gateways.
                 let mac_name = mac_to_key_name(&mac);
-                info!(mac = %mac_name, addr = %addr, "gateway address updated, reconnecting task");
-                self.table.on_connect(mac).await?;
+                debug!(mac = %mac_name, addr = %addr, "gateway source address updated");
             }
 
             Event::StatReceived(stat, mac) => {
