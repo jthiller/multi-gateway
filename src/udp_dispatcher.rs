@@ -8,17 +8,12 @@ use crate::gateway_table::{DownlinkMessage, DownlinkReceiver, GatewayTable, Pack
 use crate::keys_dir::mac_to_key_name;
 use anyhow::Result;
 use gateway_rs::{
-    semtech_udp::{
-        server_runtime::{Event, Options, UdpRuntime},
-        MacAddress,
-    },
+    semtech_udp::server_runtime::{Event, Options, UdpRuntime},
     PacketUp, Region,
 };
-use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use tracing::{debug, info, warn};
 
 /// Minimum interval between duplicate-client warn logs for the same
@@ -99,7 +94,6 @@ pub struct UdpDispatcher {
     downlink_rx: DownlinkReceiver,
     region: Region,
     health: Arc<DispatcherHealth>,
-    duplicate_log_throttle: HashMap<(MacAddress, SocketAddr), Instant>,
 }
 
 impl UdpDispatcher {
@@ -130,7 +124,6 @@ impl UdpDispatcher {
             downlink_rx,
             region,
             health: Arc::new(DispatcherHealth::new()),
-            duplicate_log_throttle: HashMap::new(),
         })
     }
 
@@ -216,7 +209,6 @@ impl UdpDispatcher {
                     .with_label_values(&[&mac_name])
                     .inc();
                 info!(mac = %mac_name, addr = %addr, "gateway disconnected (UDP keepalive timeout)");
-                self.duplicate_log_throttle.retain(|(m, _), _| *m != mac);
                 self.table.on_disconnect(mac).await;
             }
 
@@ -234,21 +226,15 @@ impl UdpDispatcher {
                 crate::metrics::GATEWAY_DUPLICATES
                     .with_label_values(&[&mac_name])
                     .inc();
-                let now = Instant::now();
-                let should_warn = self
-                    .duplicate_log_throttle
-                    .get(&(mac, rejected))
-                    .is_none_or(|t| now.duration_since(*t) >= DUPLICATE_LOG_INTERVAL);
-                if should_warn {
+                let since_prior = self.table.record_duplicate_source(mac, rejected).await;
+                if since_prior.is_none_or(|d| d >= DUPLICATE_LOG_INTERVAL) {
                     warn!(
                         mac = %mac_name,
                         existing = %existing,
                         rejected = %rejected,
                         "rejected second gateway claiming MAC already bound to another source; downlinks continue routing to the existing address"
                     );
-                    self.duplicate_log_throttle.insert((mac, rejected), now);
                 }
-                self.table.record_duplicate_source(mac, rejected).await;
             }
 
             Event::StatReceived(stat, mac) => {

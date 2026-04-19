@@ -256,20 +256,26 @@ impl GatewayEntry {
     }
 
     /// Merge a newly-seen duplicate source into the bounded ring.
-    fn record_duplicate_source(&mut self, addr: SocketAddr) {
+    /// Returns the interval since the prior observation of this addr, or
+    /// `None` if this is the first time we've seen it (since the last
+    /// disconnect). Callers use this to rate-limit repeated log emission.
+    fn record_duplicate_source(&mut self, addr: SocketAddr) -> Option<Duration> {
+        let now = Instant::now();
         if let Some(existing) = self.duplicate_sources.iter_mut().find(|r| r.addr == addr) {
-            existing.last_seen = Instant::now();
+            let elapsed = now.duration_since(existing.last_seen);
+            existing.last_seen = now;
             existing.count += 1;
-            return;
+            return Some(elapsed);
         }
         if self.duplicate_sources.len() >= MAX_TRACKED_DUPLICATE_SOURCES {
             self.duplicate_sources.pop_back();
         }
         self.duplicate_sources.push_front(DuplicateSourceRecord {
             addr,
-            last_seen: Instant::now(),
+            last_seen: now,
             count: 1,
         });
+        None
     }
 
     /// Get the gateway's public key
@@ -586,12 +592,18 @@ impl GatewayTable {
     /// Record a PULL_DATA from a different source address than the one
     /// currently bound to this MAC. The existing binding is preserved (the
     /// runtime has already rejected the change); this just captures it for
-    /// observability so the UI can warn.
-    pub async fn record_duplicate_source(&self, mac: MacAddress, rejected: SocketAddr) {
+    /// observability so the UI can warn. Returns the interval since the
+    /// prior observation of this (mac, addr) pair, or `None` if this is
+    /// the first observation — callers use it to rate-limit log emission.
+    pub async fn record_duplicate_source(
+        &self,
+        mac: MacAddress,
+        rejected: SocketAddr,
+    ) -> Option<Duration> {
         let mut entries = self.entries.write().await;
-        if let Some(entry) = entries.get_mut(&mac) {
-            entry.record_duplicate_source(rejected);
-        }
+        entries
+            .get_mut(&mac)
+            .and_then(|entry| entry.record_duplicate_source(rejected))
     }
 
     /// Handle a gateway disconnection event
