@@ -70,6 +70,15 @@ jobs:
           echo "$response" | jq -e '.connected >= 0'
           echo "$response" | jq -e '.gateways | type == "array"'
 
+      - name: Verify /version endpoint
+        run: |
+          version=$(curl -sf http://127.0.0.1:4468/version | jq -r .version)
+          echo "Reported version: $version"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "Expected /version to return a non-empty string"
+            exit 1
+          fi
+
       - name: Run integration test
         working-directory: virtual-lorawan-device
         timeout-minutes: 5
@@ -88,27 +97,46 @@ jobs:
             echo "Expected at least 1 gateway after integration test"
             exit 1
           fi
-          # Verify gateway fields are present
           echo "$response" | jq -e '.gateways[0].mac'
           echo "$response" | jq -e '.gateways[0].public_key'
           echo "$response" | jq -e '.gateways[0] | has("connected")'
-          # Test single gateway endpoint
+          # strict_client_addr: the bound source is captured on the entry.
+          echo "$response" | jq -e '.gateways[0].current_source | test("^[0-9.]+:[0-9]+$")'
+          # Happy path: no duplicate sources should be tracked.
+          echo "$response" | jq -e '(.gateways[0].duplicate_sources // []) | length == 0'
           mac=$(echo "$response" | jq -r '.gateways[0].mac')
           gw_response=$(curl -sf "http://127.0.0.1:4468/gateways/$mac")
           echo "$gw_response" | jq .
           echo "$gw_response" | jq -e '.mac'
           echo "$gw_response" | jq -e '.public_key'
 
+      - name: Verify recent packet metadata
+        run: |
+          mac=$(curl -sf http://127.0.0.1:4468/gateways | jq -r '.gateways[0].mac')
+          packets=$(curl -sf "http://127.0.0.1:4468/gateways/$mac/packets")
+          echo "$packets" | jq .
+          # At least one packet should have been recorded (the Join Request).
+          echo "$packets" | jq -e 'length >= 1'
+          # Each entry should have the parsed LoRaWAN fields the fork adds.
+          echo "$packets" | jq -e 'all(.[]; has("frame_type") and has("rssi") and has("snr") and has("frequency") and has("timestamp"))'
+          # A Join Request should be in the ring since we just joined.
+          echo "$packets" | jq -e 'any(.[]; .frame_type == "JoinRequest")'
+
       - name: Verify Prometheus metrics after integration test
         run: |
           metrics=$(curl -sf http://127.0.0.1:4468/metrics)
           echo "$metrics"
-          # Verify gateway connection was counted
           echo "$metrics" | grep -E '^gateway_connections_total\{mac="[0-9a-f]+"\} [1-9]'
-          # Verify uplink packets were counted
           echo "$metrics" | grep -E '^packets_uplink_total\{mac="[0-9a-f]+"\} [1-9]'
-          # Verify downlink packets were counted
           echo "$metrics" | grep -E '^packets_downlink_total\{mac="[0-9a-f]+"\} [1-9]'
+          # Happy path: no duplicate clients should be recorded. Any nonzero
+          # sample for this gateway indicates strict_client_addr is firing
+          # spuriously (regression).
+          mac=$(curl -sf http://127.0.0.1:4468/gateways | jq -r '.gateways[0].mac')
+          if echo "$metrics" | grep -E "^gateway_duplicates_total\{mac=\"$mac\"\} [1-9]"; then
+            echo "Unexpected gateway_duplicates_total for $mac on happy path"
+            exit 1
+          fi
 
       - name: Save pre-reconnect state
         run: |
