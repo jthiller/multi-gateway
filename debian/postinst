@@ -4,17 +4,14 @@ set -e
 mkdir -p /var/lib/helium-multi-gateway/keys 2>/dev/null || true
 systemctl daemon-reload
 
-# Restart any helium-multi-gateway@<region> instances the operator has
-# enabled. The single-instance service is intentionally not enabled here —
-# production runs the per-region template (helium-multi-gateway@us915 etc.)
-# and the un-parameterized service would fail-loop trying to bind the same
-# port. Operators wanting single-instance can `systemctl enable
-# helium-multi-gateway.service` explicitly.
-#
-# Use list-units (not list-unit-files) because template *instances* don't
-# have an enabled/disabled state in the latter — they only appear once
-# loaded. Restarting currently-active instances picks up the new binary.
-for unit in $(systemctl list-units 'helium-multi-gateway@*.service' \
-                --no-legend --plain --state=active 2>/dev/null | awk '{print $1}'); do
-  systemctl restart "$unit" || true
+# Start (or restart) each helium-multi-gateway@<region> instance the
+# operator has enabled. We detect these via the wants/ symlinks in /etc/
+# rather than `systemctl list-units --state=active`, because prerm just
+# stopped active instances and they'd no longer show as active here.
+# Symlinks under /etc/systemd/system/multi-user.target.wants/ persist
+# across dpkg cycles, so they're the durable source of truth for "which
+# regions does the operator want running".
+for link in /etc/systemd/system/multi-user.target.wants/helium-multi-gateway@*.service; do
+  [ -e "$link" ] || continue
+  systemctl restart "$(basename "$link")" || true
 done
