@@ -1,5 +1,15 @@
 [Unit]
 Description=Helium Multi-Gateway
+
+# This is the single-instance flavor — it reads /etc/helium-multi-gateway/
+# settings.toml and binds the port configured there. Production deployments
+# run the per-region template (helium-multi-gateway@<region>.service) and
+# this unit conflicts with whichever region uses the same port.
+#
+# Intentionally no [Install] section: this unit can be started transiently
+# (`systemctl start helium-multi-gateway.service`) but `systemctl enable`
+# is a no-op, so a future dpkg or operator command can't accidentally
+# stand it up alongside the per-region instances.
 After=network-online.target
 Wants=network-online.target
 
@@ -8,6 +18,3 @@ Type=simple
 ExecStart=/usr/bin/helium-multi-gateway --config /etc/helium-multi-gateway/settings.toml run
 Restart=always
 RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
