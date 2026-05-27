@@ -10,7 +10,11 @@ systemctl daemon-reload
 # and the un-parameterized service would fail-loop trying to bind the same
 # port. Operators wanting single-instance can `systemctl enable
 # helium-multi-gateway.service` explicitly.
-for unit in $(systemctl list-unit-files 'helium-multi-gateway@*.service' \
-                --no-legend --state=enabled 2>/dev/null | awk '{print $1}'); do
+#
+# Use list-units (not list-unit-files) because template *instances* don't
+# have an enabled/disabled state in the latter — they only appear once
+# loaded. Restarting currently-active instances picks up the new binary.
+for unit in $(systemctl list-units 'helium-multi-gateway@*.service' \
+                --no-legend --plain --state=active 2>/dev/null | awk '{print $1}'); do
   systemctl restart "$unit" || true
 done
