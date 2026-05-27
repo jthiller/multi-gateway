@@ -3,5 +3,14 @@ set -e
 
 mkdir -p /var/lib/helium-multi-gateway/keys 2>/dev/null || true
 systemctl daemon-reload
-systemctl enable helium-multi-gateway.service
-systemctl start helium-multi-gateway.service
+
+# Restart any helium-multi-gateway@<region> instances the operator has
+# enabled. The single-instance service is intentionally not enabled here —
+# production runs the per-region template (helium-multi-gateway@us915 etc.)
+# and the un-parameterized service would fail-loop trying to bind the same
+# port. Operators wanting single-instance can `systemctl enable
+# helium-multi-gateway.service` explicitly.
+for unit in $(systemctl list-unit-files 'helium-multi-gateway@*.service' \
+                --no-legend --state=enabled 2>/dev/null | awk '{print $1}'); do
+  systemctl restart "$unit" || true
+done

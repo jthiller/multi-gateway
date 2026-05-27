@@ -14,6 +14,7 @@ assets = [
     ["target/release/helium-multi-gateway", "usr/bin/", "755"],
     ["debian/settings.toml", "etc/helium-multi-gateway/settings.toml", "640"],
     ["debian/helium-multi-gateway.service", "lib/systemd/system/helium-multi-gateway.service", "644"],
+    ["debian/helium-multi-gateway@.service", "lib/systemd/system/helium-multi-gateway@.service", "644"],
 ]
 maintainer-scripts = "debian/"
 

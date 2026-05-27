@@ -1,5 +1,12 @@
 #!/bin/sh
 set -e
 
-systemctl stop helium-multi-gateway.service
-systemctl disable helium-multi-gateway.service
+# Stop both the un-parameterized service (in case anyone enabled it) and
+# any active per-region instances. Disable only the un-parameterized one
+# so operator-managed @region instances persist across upgrades.
+systemctl stop helium-multi-gateway.service 2>/dev/null || true
+systemctl disable helium-multi-gateway.service 2>/dev/null || true
+for unit in $(systemctl list-units 'helium-multi-gateway@*.service' \
+                --no-legend --plain --state=active 2>/dev/null | awk '{print $1}'); do
+  systemctl stop "$unit" || true
+done

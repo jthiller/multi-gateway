@@ -1,0 +1,12 @@
+[Unit]
+Description=Helium Multi-Gateway (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/helium-multi-gateway --config /etc/helium-multi-gateway/%i/settings.toml run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
